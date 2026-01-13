@@ -1,0 +1,95 @@
+
+
+
+┌─────────────┐
+│ ParkingLot  │ (Singleton)
+└──────┬──────┘
+       │ has
+       ▼
+┌─────────────┐
+│   Floor     │ (1 to many)
+└──────┬──────┘
+       │ has
+       ▼
+┌─────────────┐
+│ ParkingSpot │ (many per floor)
+└─────────────┘
+
+┌─────────────┐
+│   Vehicle   │ (Abstract/Interface)
+└──────┬──────┘
+       │
+   ┌───┴───┬───────┐
+   ▼       ▼       ▼
+  Car    Bike   Truck
+
+┌─────────────┐
+│   Ticket    │ (issued on entry)
+└─────────────┘
+
+┌─────────────┐
+│   Payment   │ (calculates amount)
+└─────────────┘
+
+class Payment{
+int paymentID;
+double amount;
+Date paymentDate;
+String paymentMethod; // e.g., Cash, Card, Online
+
+}
+
+class Ticket{
+int ticketID;
+Date entryTime;
+Date exitTime;
+int parkingSpotID;
+int vehicleID;
+double calculateParkingDuration();
+double calculateParkingFee();
+}
+
+class Car{
+int vehicleID;
+String licensePlate;
+String color;
+String model;
+
+};
+
+class Bike{
+int vehicleID;
+String licensePlate;
+String type; // e.g., Mountain, Road
+};
+
+class Truck{
+int vehicleID;
+String licensePlate;
+double loadCapacity;
+}
+
+class Vehicle{
+int vehicleID;
+String licensePlate;
+String getVehicleType();
+}
+class ParkingSpot{
+int spotID;
+String spotType; // e.g., Compact, Large, Handicapped
+boolean isOccupied;
+void assignSpot(Vehicle vehicle);
+void vacateSpot();
+}
+class Floor{
+int floorNumber;
+List<ParkingSpot> parkingSpots;
+void addParkingSpot(ParkingSpot spot);
+void removeParkingSpot(int spotID);
+}
+class ParkingLot{
+int lotID;
+String location;
+List<Floor> floors;
+static ParkingLot instance;
+}
