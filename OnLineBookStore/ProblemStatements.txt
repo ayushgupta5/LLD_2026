@@ -1,0 +1,77 @@
+Design Online Book Store and Write a Ciode Snippet for the Following Problem Statement:
+
+Online Book Store
+
+Functional Requirements:
+1. User can Login/Signup.
+2. User can browse books by categories (Fiction, Non-Fiction, Science, etc.).
+3. User can search for books by title, author, or ISBN.
+4. User can add books to a shopping cart.
+5. User can check out and make payments.
+
+Classes:-
+1. User
+2. books
+    a. categories (Fiction, Non-Fiction, Science, etc.)
+3. ShoppingCart
+4. Payment (Payment Methods: Credit Card, PayPal, etc.)
+5. Order
+
+class User {
+    int userID;
+    string userName;
+    string userEmail;
+    string password;
+    string UserAddress;
+
+    void login(string userEmail, string password);
+    void signup(string userName, string userEmail, string password, string UserAddress);
+};
+enum category {
+    Fiction,
+    NonFiction,
+    Science,
+    History,
+    Biography
+}
+class Book {
+int bookID;
+string title;
+string author;
+string ISBN;
+category category; // e.g., Fiction, Non-Fiction, Science
+double price;
+bool isAvailable;
+int stockQuantity;
+void updateStock(int quantity);
+bool checkAvailability();
+};
+
+class ShoppingCart {
+int cartID;
+int userID;
+list<Book> books;
+void addBook(Book book);
+void removeBook(Book book);
+double calculateTotal();
+}
+
+class Payment {
+int paymentID;
+int orderID;
+double amount;
+Date paymentDate;
+string paymentMethod; // e.g., Credit Card, PayPal
+string paymentStatus; // e.g., Pending, Completed, Failed
+void processPayment(int userID, double amount, string paymentMethod);
+}
+
+class Order {
+int orderID;
+int userID;
+list<Book> books;
+double totalAmount;
+Date orderDate;
+string orderStatus; // e.g., Processing, Shipped, Delivered
+void placeOrder(int userID, list<Book> books, double totalAmount);
+}

@@ -139,24 +139,6 @@ public class ParkingSpot {
         System.out.println("\n=== Demo Complete ===");
     }
 }
-
-class Payment{
-    int paymentID;
-    double amount;
-    Date paymentDate;
-    String paymentMethod; // e.g., Cash, Card, Online
-
-    public Payment() {}
-
-    public Payment(int paymentID, double amount, Date paymentDate, String paymentMethod) {
-        this.paymentID = paymentID;
-        this.amount = amount;
-        this.paymentDate = paymentDate;
-        this.paymentMethod = paymentMethod;
-    }
-
-}
-
 class Ticket{
     int ticketID;
     Date entryTime;
