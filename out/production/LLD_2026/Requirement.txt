@@ -1,0 +1,124 @@
+Design E-Commerce System
+
+Classes:-
+class User {
+    UserID
+    UserName
+    Email
+    Password
+    }
+
+class AuthService {
+
+    Login()
+    Logout()
+
+    }
+    class RegistrationService {
+    Register()
+
+    }
+    class ProfileService {
+    UpdateProfile()
+    }
+class Product
+    ProductID
+    ProductName
+    Description
+    Price
+    ImageURL
+    Category
+class ProductService {
+AddProduct()
+    EditProduct()
+    DeleteProduct()
+}
+class ProductSerchService{
+SearchProduct()
+}
+ShoppingCart
+    CartID
+    UserID
+    Products[]
+    AddToCart()
+    RemoveFromCart()
+    UpdateQuantity()
+    ViewCart()
+class PriceManager{
+totalPrice()
+}
+Order
+    OrderID
+    UserID
+    Products[]
+    ShippingAddress
+    BillingAddress
+    PaymentMethod
+
+class OrderService {
+PlaceOrder()
+    CancelOrder()
+}
+class OrderHistoryService{
+ViewOrderHistory()
+}
+class Payment
+    PaymentID
+    OrderID
+    Amount
+    PaymentMethod
+
+interface PaymentStrategy {
+    ProcessPayment()
+}
+class CreditCardPayment implements PaymentStrategy {
+    ProcessPayment()
+}
+class UPI implements PaymentStrategy {
+    ProcessPayment()
+}
+class NetBanking implements PaymentStrategy {
+    ProcessPayment()
+}
+class PaymentService {
+    PaymentStrategy paymentStrategy
+    setPaymentStrategy( PaymentStrategy)
+    ProcessPayment(PaymentStrategy)
+}
+#Functional Requirements
+1. User Registration and Authentication
+   - Users should be able to register with email and password.
+   - Users should be able to log in and log out securely.
+2. Product Catalog
+   - Display a list of products with images, descriptions, and prices.
+   - Search functionality to find products by name or category.
+   - Filter products by price range, brand, and ratings.
+3. Shopping Cart
+   - Users can add/remove products to/from the cart.
+   - View cart summary with total price.
+   - Update product quantities in the cart.
+4. Checkout Process
+   - Collect shipping and billing information.
+   - Integrate with payment gateways (e.g., PayPal, Stripe).
+   - Order confirmation and receipt generation.
+5. Order Management
+   - Users can view their order history.
+   - Admins can manage orders (view, update status, cancel).
+6. User Profile Management
+   - Users can update personal information (name, address, phone).
+   - Change password functionality.
+
+#Non-Functional Requirements
+1. Performance
+   - The system should handle at least 1000 concurrent users.
+   - Page load time should be under 3 seconds.
+2. Security
+   - Use HTTPS for secure communication.
+   - Store passwords securely using hashing algorithms.
+   - Implement input validation to prevent SQL injection and XSS attacks.
+3. Scalability
+   - The system should be designed to scale horizontally.
+   - Use load balancers to distribute traffic.
+4. Usability
+   - The user interface should be intuitive and easy to navigate.
+   - Provide responsive design for mobile and desktop users.
