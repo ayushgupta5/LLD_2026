@@ -1,0 +1,91 @@
+Design CourseRegistrationSystem Low Level Design :-
+
+#Functional Requirements:
+1. User Registration and Authentication
+2. Course Listing and Search
+3. Course Enrollment
+4. Payment Processing
+5. Enrollment History and Management
+#Non-Functional Requirements:
+1. Performance: The system should handle high traffic during peak enrollment periods with minimal latency.
+2. Scalability: The system should be able to scale horizontally to accommodate a growing user base and increasing number of courses.
+3. Security: Ensure secure handling of user data and payment information.
+4. Usability: The user interface should be intuitive and easy to navigate.
+class User {
+private int userID;
+private String name;
+private String email;
+private String password;
+private String phoneNumber;
+private String address;
+
+}
+interface UserAuthentication {
+    void login();
+    void logout();
+}
+interface UserRegistrationService {
+    void register();
+    }
+
+class Course {
+private int courseID;
+private String title;
+private String description;
+private String instructor;
+private float price;
+private String category;
+}
+interface CourseService {
+    void listCourses();
+    void searchCourse(String title, String category);
+}
+interface EnrollmentService {
+    void enrollCourse(int userID, int courseID);
+    void viewEnrollmentHistory(int userID);
+}
+interface PaymentStrategy {
+    void processPayment();
+}
+class CreditCardPayment implements PaymentStrategy {
+    public void processPayment() {
+    }
+    }
+class UPI implements PaymentStrategy {
+    public void processPayment() {
+    }
+}
+class NetBanking implements PaymentStrategy {
+    public void processPayment() {
+    }
+}
+class PaymentService {
+    private PaymentStrategy paymentStrategy;
+    public void setPaymentStrategy(PaymentStrategy paymentStrategy) {
+        this.paymentStrategy = paymentStrategy;
+    }
+    public void processPayment() {
+        paymentStrategy.processPayment();
+    }
+}
+class Payment {
+private int paymentID;
+private int userID;
+private int courseID;
+private float amount;
+}
+class Enrollment {
+private int enrollmentID;
+private int userID;
+private int courseID;
+private String enrollmentDate;
+}
+class EnrollmentHistoryService {
+    public void viewEnrollmentHistory(int userID) {
+    }
+}
+class CourseRegistrationSystem {
+    public static void main(String[] args) {
+        // Main application logic here
+    }
+}
