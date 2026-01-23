@@ -33,7 +33,7 @@ mysql_secure_installation
 mysql --version
 ```
 
-## 2. Create Database and User
+## 2. Create Database and Walmart.LLD.User
 
 ```bash
 # Login to MySQL (default root password is empty)
@@ -143,7 +143,7 @@ import jakarta.persistence.*;
 
 @Entity
 @Table(name = "users")
-public class User {
+public class Walmart.LLD.User {
     
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -156,9 +156,9 @@ public class User {
     private String email;
     
     // Constructors
-    public User() {}
+    public Walmart.LLD.User() {}
     
-    public User(String name, String email) {
+    public Walmart.LLD.User(String name, String email) {
         this.name = name;
         this.email = email;
     }
@@ -195,14 +195,14 @@ public class User {
 ```java
 package com.example.demo.repository;
 
-import com.example.demo.entity.User;
+import com.example.demo.entity.Walmart.LLD.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 import java.util.Optional;
 
 @Repository
-public interface UserRepository extends JpaRepository<User, Long> {
-    Optional<User> findByEmail(String email);
+public interface UserRepository extends JpaRepository<Walmart.LLD.User, Long> {
+    Optional<Walmart.LLD.User> findByEmail(String email);
 }
 ```
 
@@ -211,7 +211,7 @@ public interface UserRepository extends JpaRepository<User, Long> {
 ```java
 package com.example.demo.service;
 
-import com.example.demo.entity.User;
+import com.example.demo.entity.Walmart.LLD.User;
 import com.example.demo.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -223,15 +223,15 @@ public class UserService {
     @Autowired
     private UserRepository userRepository;
     
-    public List<User> getAllUsers() {
+    public List<Walmart.LLD.User> getAllUsers() {
         return userRepository.findAll();
     }
     
-    public User saveUser(User user) {
+    public Walmart.LLD.User saveUser(Walmart.LLD.User user) {
         return userRepository.save(user);
     }
     
-    public User getUserById(Long id) {
+    public Walmart.LLD.User getUserById(Long id) {
         return userRepository.findById(id).orElse(null);
     }
     

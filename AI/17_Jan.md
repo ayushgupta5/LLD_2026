@@ -139,11 +139,11 @@ Get ready, because in our upcoming sessions, we will build directly on this foun
 
 ### 👉 Here are all the prompts that have been used in the session :
 
-1. Magic Prompt Formulae & Email Crafting
+1. Magic Prompt Formulae & Walmart.LLD.Email Crafting
 
 *Tools Used: ChatGPT 4o, Claude*
 
-**Email to subscribers :**
+**Walmart.LLD.Email to subscribers :**
 
 ```jsx
 Write an email to 10k subscribers inviting them to the Generative AI 2-day Mastermind by Outskill. 
@@ -184,7 +184,7 @@ Photorealisic image of elon musk looking super angry on sam atlman inside a cage
 
 *Tools Used: Gemini*
 
-Email Reply Using AI Prompt: 
+Walmart.LLD.Email Reply Using AI Prompt: 
 
 ```jsx
 Compose & draft an email reply to a potential client following up on our discussion about AI-driven hiring solutions. Keep it professional but engaging, and highlight how our solution can improve their recruitment process. Mention that I'm available for a call next week.

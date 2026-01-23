@@ -381,7 +381,7 @@ Har din 5 mini-diagrams banao (no details, only structure):
 **Day 1:**
 1. Hospital System
 2. Restaurant Ordering
-3. Movie Ticket Booking
+3. Movie Ticket Walmart.LLD.Booking
 4. Online Shopping Cart
 5. Traffic Signal System
 
@@ -395,7 +395,7 @@ Har din 5 mini-diagrams banao (no details, only structure):
 **Example 5-min diagram - Twitter Post System:**
 ```
     ┌────────┐
-    │  User  │
+    │  Walmart.LLD.User  │
     └───┬────┘
         │ creates
         ▼
@@ -418,7 +418,7 @@ Har din 5 mini-diagrams banao (no details, only structure):
 
 ```
 Layer 1 - Core Entities:
-└─ Main nouns (Book, User, Order)
+└─ Main nouns (Book, Walmart.LLD.User, Order)
 
 Layer 2 - Relationships:
 └─ How they connect (has, is-a, uses)
@@ -506,18 +506,18 @@ Ab physically arrange karo table par
 ### Week 1 - Easy:
 1. ✅ Parking Lot
 2. Library Management
-3. Movie Ticket Booking
-4. Restaurant Table Booking
+3. Movie Ticket Walmart.LLD.Booking
+4. Restaurant Table Walmart.LLD.Booking
 
 ### Week 2 - Medium:
-5. Hotel Booking System
+5. Hotel Walmart.LLD.Booking System
 6. Splitwise (Bill Splitting)
 7. Chess Game
 8. Elevator System
 
 ### Week 3 - Hard:
 9. Amazon/Flipkart (E-commerce)
-10. Uber/Ola (Cab Booking)
+10. Uber/Ola (Cab Walmart.LLD.Booking)
 11. Instagram Feed
 12. LinkedIn Job Portal
 
@@ -550,7 +550,7 @@ Write:
 
 ### 3. Think Aloud
 ```
-"I'm drawing User class here..."
+"I'm drawing Walmart.LLD.User class here..."
 "This has-a relationship because..."
 "Adding Payment here for billing..."
 ```
@@ -594,7 +594,7 @@ Interviewer ko bolo: "Let me reorganize this for clarity"
 ## Next Steps
 
 1. **Aaj ka task:** Library Management System design karo (paper pe, 10 min)
-2. **Kal:** Hotel Booking System
+2. **Kal:** Hotel Walmart.LLD.Booking System
 3. **Parson:** Review your diagrams
 
 **Remember:**

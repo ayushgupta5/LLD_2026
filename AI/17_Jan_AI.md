@@ -125,7 +125,7 @@ Here are the main AI assistants and what they're best at:
 
 Here are the prompts we used in class. Try them again on your own!
 
-### **1. Write a Professional Email**
+### **1. Write a Professional Walmart.LLD.Email**
 
 ```
 You are an experienced email writer. Write an email inviting people to a free AI workshop. Make it fun and exciting for people aged 25+ who work in marketing, tech, or design. Keep it under 200 words. Mention that attendees will learn practical AI tools and get free prompt templates.

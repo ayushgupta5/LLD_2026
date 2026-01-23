@@ -1,21 +1,21 @@
 LibraryManagementSystem Low Level Design UML Diagram
 
 Functional Requirements
-1. User can login/signup
+1. Walmart.LLD.User can login/signup
 2. Librarian can add/remove books
-3. User can search for books by title, author, or ISBN
-4. User can borrow/return books
+3. Walmart.LLD.User can search for books by title, author, or ISBN
+4. Walmart.LLD.User can borrow/return books
 5. Librarian can manage book inventory
-6. User can view borrowed book history
+6. Walmart.LLD.User can view borrowed book history
 7. Librarian can view user borrowing history
-8. User can pay fines for late returns
+8. Walmart.LLD.User can pay fines for late returns
 9. Librarian can generate reports on book usage and user activity
 10. System should send notifications for due dates and overdue books
 
 
 
 classes:-
-1. User
+1. Walmart.LLD.User
 2. Librarian
 3. Books
 4. Borrowing
@@ -23,7 +23,7 @@ classes:-
 6. Notification
 7. Report
 
-class User {
+class Walmart.LLD.User {
     int userID;
     string userName;
     string userEmail;
@@ -90,7 +90,7 @@ class Notification {
 };
 class Report {
     int reportID;
-    string reportType; // e.g., Book Usage, User Activity
+    string reportType; // e.g., Book Usage, Walmart.LLD.User Activity
     Date generatedDate;
     void generateReport(string reportType);
 };

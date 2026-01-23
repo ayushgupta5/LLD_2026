@@ -656,7 +656,7 @@ Show you can design a system that another engineer would want to work with. Clea
 ### Other LLD Problems to Practice
 - Elevator System
 - Library Management System
-- Hotel Booking System
+- Hotel Walmart.LLD.Booking System
 - ATM Machine
 - Snake and Ladder Game
 - Chess Game

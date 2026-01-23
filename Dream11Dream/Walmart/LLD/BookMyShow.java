@@ -1,4 +1,4 @@
-/*
+package Walmart.LLD;/*
 Functional Requirements: 
 1.Users can search for shows based on a movie title and a city. 
 2. The system should support multiple cities, cinemas, screens, and shows. 
@@ -9,19 +9,19 @@ Functional Requirements: 
 bonus: The system must be flexible to support different payment methods.
 
 
-class User{}
-interface ISearchShowsService {
+class Walmart.LLD.User{}
+interface Walmart.LLD.ISearchShowsService {
 
 }
-1. Search Shows (movieTitle, city)
-City --> []Cinemas
-Cinema --> []Screen
+1. Search Walmart.LLD.Shows (movieTitle, city)
+Walmart.LLD.City --> []Cinemas
+Walmart.LLD.Cinema --> []Walmart.LLD.Screen
 
-Screen --> []shows --> []Seats --> Enum (REGULAR, PREMIUM)
+Walmart.LLD.Screen --> []shows --> []Seats --> Enum (REGULAR, PREMIUM)
 Screen1 (totalSeats=100, REGULAR=75, PREMIUM=25)
-Shows
+Walmart.LLD.Shows
 
-BookingManager()
+Walmart.LLD.BookingManager()
 Payment
 * */
 
@@ -114,17 +114,17 @@ interface PaymentStrategy {
 }
 class UPI implements PaymentStrategy {
     void Pay() {
-        sop("UPI Payment");
+        sop("Walmart.LLD.UPI Payment");
     }
 }
 class CrediCard implements PaymentStrategy {
     void Pay() {
-        sop("UPI Payment");
+        sop("Walmart.LLD.UPI Payment");
     }
 }
 class NetBanking implements PaymentStrategy {
     void Pay() {
-        sop("UPI Payment");
+        sop("Walmart.LLD.UPI Payment");
     }
 }
 
@@ -143,17 +143,17 @@ interface NotificationStareggy {
 }
 class SMS implements NotificationStareggy {
     void Pay() {
-        sop("UPI Payment");
+        sop("Walmart.LLD.UPI Payment");
     }
 }
 class Email implements NotificationStareggy {
     void Pay() {
-        sop("UPI Payment");
+        sop("Walmart.LLD.UPI Payment");
     }
 }
 class PushInbox implements NotificationStareggy {
     void Pay() {
-        sop("UPI Payment");
+        sop("Walmart.LLD.UPI Payment");
     }
 }
 

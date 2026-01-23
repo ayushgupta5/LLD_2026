@@ -252,7 +252,7 @@ Classes:
    - expiryDate: DateTime
    - userId: String
    
-2. User
+2. Walmart.LLD.User
    - userId: String
    - name: String
    - urlsCreated: List<URL>
@@ -894,7 +894,7 @@ Scalability:
 Alerting:
 - Rule engine
 - Threshold-based alerts
-- Notification channels (Email, Slack, PagerDuty)
+- Notification channels (Walmart.LLD.Email, Slack, PagerDuty)
 ```
 
 ---
@@ -1129,7 +1129,7 @@ Abstraction:
 
 Example:
 interface Payment {
-    void pay(double amount); // User knows what, not how
+    void pay(double amount); // Walmart.LLD.User knows what, not how
 }
 
 Encapsulation:

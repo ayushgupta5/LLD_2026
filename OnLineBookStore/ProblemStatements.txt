@@ -3,21 +3,21 @@ Design Online Book Store and Write a Ciode Snippet for the Following Problem Sta
 Online Book Store
 
 Functional Requirements:
-1. User can Login/Signup.
-2. User can browse books by categories (Fiction, Non-Fiction, Science, etc.).
-3. User can search for books by title, author, or ISBN.
-4. User can add books to a shopping cart.
-5. User can check out and make payments.
+1. Walmart.LLD.User can Login/Signup.
+2. Walmart.LLD.User can browse books by categories (Fiction, Non-Fiction, Science, etc.).
+3. Walmart.LLD.User can search for books by title, author, or ISBN.
+4. Walmart.LLD.User can add books to a shopping cart.
+5. Walmart.LLD.User can check out and make payments.
 
 Classes:-
-1. User
+1. Walmart.LLD.User
 2. books
     a. categories (Fiction, Non-Fiction, Science, etc.)
 3. ShoppingCart
 4. Payment (Payment Methods: Credit Card, PayPal, etc.)
 5. Order
 
-class User {
+class Walmart.LLD.User {
     int userID;
     string userName;
     string userEmail;

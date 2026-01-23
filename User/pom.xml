@@ -8,10 +8,10 @@
 		<version>4.0.1</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
-	<groupId>com.User</groupId>
-	<artifactId>User</artifactId>
+	<groupId>com.Walmart.LLD.User</groupId>
+	<artifactId>Walmart.LLD.User</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<name>User</name>
+	<name>Walmart.LLD.User</name>
 	<description>Demo project for Spring Boot</description>
 	<url/>
 	<licenses>
