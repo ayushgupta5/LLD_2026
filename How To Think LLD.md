@@ -26,7 +26,7 @@ Aap khud se socho: "Real parking lot mein kya hota hai?"
 #### **A - Actors Identify Karo**
 ```
 Kaun kaun interact karega?
-- Customer (vehicle owner)
+- Customer_a (vehicle owner)
 - Parking Attendant
 - System Admin
 - Automated System

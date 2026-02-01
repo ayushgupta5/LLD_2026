@@ -1,0 +1,11 @@
+{
+  "serialVersionUID": 1,
+  "orderId": 1023,
+  "customerId": 14,
+  "itemName": "AirPods Pro",
+  "status": "PENDING",
+  "assignedPartnerId": null,
+  "createdAt": "2026-01-29T10:36:40.502962",
+  "pickedUpAt": null,
+  "deliveredAt": null
+}

@@ -1,0 +1,12 @@
+{
+  "partnerId": 9,
+  "name": "Amit Singh",
+  "phone": "9999888877",
+  "vehicleNumber": "DL-01-AB-1234",
+  "status": "BUSY",
+  "currentOrderId": 1021,
+  "totalDeliveries": 2,
+  "totalRating": 10.0,
+  "ratingCount": 2,
+  "joinedAt": "2026-01-29T10:22:05.473305"
+}

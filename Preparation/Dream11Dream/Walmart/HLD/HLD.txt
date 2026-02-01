@@ -1,0 +1,115 @@
+#Statements:- Users place orders, make payments, track shipments, cancel orders, Email Communication(Order confirmation , Ready for pickup , Order on the way , Delivered , Cancelled)
+
+User
+	Register();
+	Login()/Logout()
+	PlaceOrder()
+	MakePayment()
+	TrackShipment()
+	CancelOrder()
+	EmailCommunication() --> Order Confirmation()
+	                     --> ReadyForPick()
+	                     -->Order on the Way
+	                     --> Delivereed
+	                     --> Cancelled
+
+
+
+Flow:-
+
+Registration Service() --> AuthService() (Login/logOut) -->
+
+
+ProductService:-
+RecommendedProduct();
+SerchProductSerVice();
+
+CartService:-
+Cart();
+
+OrderService:-
+PlaceOrder();
+CancelOrder()
+
+PaymentService:-
+MakePayment();
+  --> UPI
+  --> CreditCard
+  --> NetBanking
+  (strategy Pattern | Factory Pattern)
+
+NotificationService:-
+Email();
+PushInbox();
+SMS();
+
+Notification_Type_Configuration
+Order Confirmation()
+ ReadyForPick()
+-->Order on the Way
+--> Delivereed
+--> Cancelled
+
+--> Strategy Pattern (LLD) | Factory Pattern(LLD)
+
+ShipmentTrackerService:-
+TrackShipement()
+
+
+
+
+
+
+
+
+
+Client --> LoadBalancer --> RateLimiter -->ApiServer --> AuthService
+                                                     --> ProductService
+                                                     --> CartService
+                                                     --> Make_Order_Service
+                                                     --> PaymentService
+                                                     --> Notification Service
+                                                     --> ShipmentTrackerService
+
+
+
+AuthService --> Register/login/logout
+
+ProductService --> SerchProduct --> DB Call --> Redis.
+--> publish to kafka --> CartService --> Publish To Kafka --> (Retry Mechanism in such a way it will requed to kafka)
+Make_Order_Service --> publish to kafka -->
+PaymentService --> publish to kafka -->
+Notification Service (Param Value -> Name, Product, Amount etc etc, Order)
+
+
+                                            --> Slave DB
+
+OrderService --> Which has all the Information
+
+CRON JOB --> Trigger every
+
+
+ShipmentTrackerService -->
+1. TrackerID (UUID)
+2. Show the shipment status with the help of TrackerID
+
+ShipmentTrackerService --> Kafka --> 3rd Party Service --> (status of that TrackerID)
+
+
+1. Pagination (20 Items per Loading)
+
+
+1. Consistency/ Availability
+ CAP --> CA + AP + AC -->
+2.
+
+
+Sell is Going On
+--> We will get much Load. Too Much Traffic
+--> Retune Rate limiter
+--> We will increse the Number of Pods
+
+
+
+
+

@@ -1,0 +1,11 @@
+{
+  "serialVersionUID": 1,
+  "orderId": 1021,
+  "customerId": 14,
+  "itemName": "MacBook Pro",
+  "status": "PENDING",
+  "assignedPartnerId": null,
+  "createdAt": "2026-01-29T10:36:38.481663",
+  "pickedUpAt": null,
+  "deliveredAt": null
+}

@@ -1,0 +1,64 @@
+src/
+├── models/
+│   ├── User.java
+│   ├── Question.java
+│   ├── Answer.java
+│   └── Topic.java
+│
+├── services/
+│   ├── UserService.java
+│   ├── QuestionService.java
+│   ├── AnswerService.java
+│   └── TopicService.java
+│
+├── repositories/
+│   ├── UserRepository.java
+│   ├── QuestionRepository.java
+│   ├── AnswerRepository.java
+│   └── TopicRepository.java
+│
+├── exceptions/
+│   ├── UserNotFoundException.java
+│   ├── UnauthorizedException.java
+│   ├── InvalidOperationException.java
+│   └── DuplicateUserException.java
+│
+└── QAApplication.java (Driver class)
+
+- userId: String
+- name: String
+- email: String
+- password: String
+- profession: String
+- subscribedTopics: Set<String>
+- createdAt: LocalDateTime
+
+- questionId: String
+- userId: String
+- title: String
+- description: String
+- topics: Set<String>
+- upvotes: int
+- upvotedBy: Set<String>
+- createdAt: LocalDateTime
+
+- answerId: String
+- questionId: String
+- userId: String
+- content: String
+- upvotes: int
+- upvotedBy: Set<String>
+- createdAt: LocalDateTime
+
+- topicName: String
+- subscriberCount: int
+
+
+userService:-
++ signup(name, email, password, profession): User
++ login(email, password): User
++ logout(): void
++ getCurrentUser(): User
++ subscribeToTopic(topicName): void
++ unsubscribeFromTopic(topicName): void
++ getUserSubscribedTopics(): Set<String>

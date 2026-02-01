@@ -1,0 +1,11 @@
+{
+  "serialVersionUID": 1,
+  "orderId": 1024,
+  "customerId": 15,
+  "itemName": "Samsung TV",
+  "status": "PENDING",
+  "assignedPartnerId": null,
+  "createdAt": "2026-01-29T10:36:41.012986",
+  "pickedUpAt": null,
+  "deliveredAt": null
+}

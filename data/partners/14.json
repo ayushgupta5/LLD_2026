@@ -1,0 +1,13 @@
+{
+  "serialVersionUID": 1,
+  "partnerId": 14,
+  "name": "Suresh Patel",
+  "phone": "9999888878",
+  "vehicleNumber": "DL-02-CD-5678",
+  "status": "AVAILABLE",
+  "currentOrderId": null,
+  "totalDeliveries": 0,
+  "totalRating": 0.0,
+  "ratingCount": 0,
+  "joinedAt": "2026-01-29T10:36:37.975105"
+}

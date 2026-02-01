@@ -1,0 +1,45 @@
+1. Design a music streaming application which fetches top trending songs (with regional filtering, scalability, fault tolerance, data schema, DB choices)
+2. Design a hotel searching system (add/remove functionalities, scaling, caching, rate limiting, tradeoffs)
+3. Design log/media storage system accepting data from multiple sources (API, CSV, events)
+4. Design a flight search system (with 3rd party pricing, metered API costs, dynamic real-time price changes)
+5. Design YouTube (registered user upload, any user search and view)
+6. Design a hotel booking/search system with emphasis on proximity-based search
+7. Given RDBMS table with 500 mil records - build a distributed scheduler based on URL frequency
+8. Design a Payment gateway system for a company (scalability, Kafka exactly-once message processing)
+9. Design a file storage service
+10. Design a flight booking system (booking contention, payments, failure handling, syncing with aggregators)
+11. Design a system for managing and retrieving flight prices from different providers (rate limiting per provider, distributed DC challenges)
+12. Design a location sharing app (database design for sharing location with constraints - time and location restrictions)
+13. Design WhatsApp
+14. Design a doctor appointment booking application
+15. Design a hotel reservation system (how to stop double bookings)
+16. Local vs. global caching
+17. Concepts of Sharding and Federation (availability and challenges)
+18. Caching and techniques
+19. Adapters (including file and FTP adapters)
+20. Strong vs. Eventual Consistency
+21. Distributed system across regions - how to maintain consistency
+22. Create a rate limiter for various APIs (mobile, web) with signature databases and ML-based algorithms
+23. Design Top K heavy hitter problem with log aggregation and low latency requirements
+24. Design a reconciliation system for car dealer showroom
+25. Flight inventory system - querying internal data and external services (MakeMyTrip, Booking.com)
+26. Design a Distributed Key Value Data Store
+27. Design a Movie Seat Serving System (payment to seat confirmation flow, handling concurrent bookings, DB level locking)
+28. Design a system - E-commerce top 20/30 selling items (priority queue, cache, distributed design)
+29. How to replicate data across multiple data centers
+30. Design a SIM card store system (generate unpredictable phone numbers, track sold/unused numbers, efficient storage and retrieval)
+31. How would you optimize search results in Agoda?
+32. Design an algorithm for ranking hotel search results
+33. Design a real-time chat application
+34. Build a distributed message broker for high-throughput applications
+35. Develop a cloud-based file storage system like Dropbox
+36. Design a highly available distributed configuration store
+37. Design nearby places recommender system like Yelp (proximity-based search)
+38. Design a gaming leaderboard
+39. Design Hotel Reservation System
+40. Design Schema for a Multilingual Database
+41. Improve a badly designed system and justify technical decisions (given existing system, identify flaws, propose improvements)
+42. Design Multi-Property Hotel Management & Reservation Platform
+43. Design a robust, scalable Android system (architectural choices, caching, data flow, state management, testing, monitoring, scaling)
+44. Flight inventory from multiple suppliers with metered API - show cheapest option to users, handle frequent price updates (no push mechanism)
+45. Design a store management system for inventory management

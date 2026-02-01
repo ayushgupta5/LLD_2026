@@ -1,0 +1,13 @@
+{
+  "serialVersionUID": 1,
+  "partnerId": 13,
+  "name": "Amit Singh",
+  "phone": "9999888877",
+  "vehicleNumber": "DL-01-AB-1234",
+  "status": "AVAILABLE",
+  "currentOrderId": null,
+  "totalDeliveries": 0,
+  "totalRating": 0.0,
+  "ratingCount": 0,
+  "joinedAt": "2026-01-29T10:36:37.971757"
+}

@@ -1,0 +1,10 @@
+{
+  "orderId": 1029,
+  "customerId": 17,
+  "itemName": "Samsung TV",
+  "status": "PENDING",
+  "assignedPartnerId": null,
+  "createdAt": "2026-01-29T10:47:12.823160",
+  "pickedUpAt": null,
+  "deliveredAt": null
+}

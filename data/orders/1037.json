@@ -1,0 +1,10 @@
+{
+  "orderId": 1037,
+  "customerId": 21,
+  "itemName": "iPhone 15",
+  "status": "PENDING",
+  "assignedPartnerId": null,
+  "createdAt": "2026-01-29T11:31:57.398285",
+  "pickedUpAt": null,
+  "deliveredAt": null
+}

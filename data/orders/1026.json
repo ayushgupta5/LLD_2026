@@ -1,0 +1,10 @@
+{
+  "orderId": 1026,
+  "customerId": 16,
+  "itemName": "MacBook Pro",
+  "status": "PENDING",
+  "assignedPartnerId": null,
+  "createdAt": "2026-01-29T10:47:10.293471",
+  "pickedUpAt": null,
+  "deliveredAt": null
+}

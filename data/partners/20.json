@@ -1,0 +1,11 @@
+{
+  "partnerId": 20,
+  "name": "DeliveryPartner p2",
+  "phone": "9999888878",
+  "vehicleNumber": "456",
+  "status": "AVAILABLE",
+  "currentOrderId": null,
+  "totalDeliveries": 0,
+  "totalRating": 0.0,
+  "ratingCount": 0
+}

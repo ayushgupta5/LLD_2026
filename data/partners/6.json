@@ -1,0 +1,12 @@
+{
+  "partnerId": 6,
+  "name": "Suresh Patel",
+  "phone": "9999888878",
+  "vehicleNumber": "DL-02-CD-5678",
+  "status": "BUSY",
+  "currentOrderId": 1012,
+  "totalDeliveries": 1,
+  "totalRating": 3.0,
+  "ratingCount": 1,
+  "joinedAt": "2026-01-29T10:19:54.443151"
+}

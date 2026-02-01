@@ -1,0 +1,10 @@
+{
+  "orderId": 1035,
+  "customerId": 18,
+  "itemName": "PS5",
+  "status": "PENDING",
+  "assignedPartnerId": null,
+  "createdAt": "2026-01-29T11:27:51.969055",
+  "pickedUpAt": null,
+  "deliveredAt": null
+}
