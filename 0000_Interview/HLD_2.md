@@ -131,459 +131,638 @@ Read Path (Quorum R=2):
 
 **Implementation**:
 
-```python
-import hashlib
-import bisect
-from typing import Any, List, Optional, Tuple
-from datetime import datetime, timedelta
-import asyncio
+```java
+import java.security.MessageDigest;
+import java.time.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
-class ConsistentHashRing:
-    """Consistent hashing ring for data distribution."""
+/**
+ * Consistent Hashing Ring for distributed data partitioning.
+ * Uses virtual nodes to ensure even distribution across physical nodes.
+ */
+public class ConsistentHashRing {
     
-    def __init__(self, nodes: List[str], virtual_nodes: int = 150):
-        self.virtual_nodes = virtual_nodes
-        self.ring = []  # Sorted list of (hash, node) tuples
-        self.nodes = set()
-        
-        for node in nodes:
-            self.add_node(node)
+    private final int virtualNodesPerNode;
+    private final TreeMap<Long, String> ring = new TreeMap<>();
+    private final Set<String> physicalNodes = new HashSet<>();
     
-    def _hash(self, key: str) -> int:
-        """Hash key to position on ring (0-2^32)."""
-        return int(hashlib.md5(key.encode()).hexdigest(), 16)
+    public ConsistentHashRing(List<String> nodes, int virtualNodesPerNode) {
+        this.virtualNodesPerNode = virtualNodesPerNode;
+        nodes.forEach(this::addNode);
+    }
     
-    def add_node(self, node: str):
-        """Add a node with virtual nodes to the ring."""
-        self.nodes.add(node)
-        for i in range(self.virtual_nodes):
-            virtual_key = f"{node}:{i}"
-            hash_value = self._hash(virtual_key)
-            bisect.insort(self.ring, (hash_value, node))
+    /**
+     * Hash a key to position on the ring (0 to 2^32-1).
+     */
+    private long hash(String key) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(key.getBytes());
+            // Use first 4 bytes for hash value
+            return ((long)(digest[0] & 0xFF) << 24) |
+                   ((long)(digest[1] & 0xFF) << 16) |
+                   ((long)(digest[2] & 0xFF) << 8) |
+                   ((long)(digest[3] & 0xFF));
+        } catch (Exception e) {
+            return key.hashCode() & 0xFFFFFFFFL;
+        }
+    }
     
-    def remove_node(self, node: str):
-        """Remove a node and its virtual nodes."""
-        self.nodes.discard(node)
-        self.ring = [(h, n) for h, n in self.ring if n != node]
+    /**
+     * Add a physical node with its virtual nodes to the ring.
+     */
+    public void addNode(String node) {
+        physicalNodes.add(node);
+        for (int i = 0; i < virtualNodesPerNode; i++) {
+            String virtualKey = node + ":" + i;
+            long hashValue = hash(virtualKey);
+            ring.put(hashValue, node);
+        }
+    }
     
-    def get_nodes(self, key: str, count: int = 3) -> List[str]:
-        """Get N responsible nodes for a key (clockwise)."""
-        if not self.ring:
-            return []
+    /**
+     * Remove a node and all its virtual nodes from the ring.
+     */
+    public void removeNode(String node) {
+        physicalNodes.remove(node);
+        ring.entrySet().removeIf(entry -> entry.getValue().equals(node));
+    }
+    
+    /**
+     * Get N responsible nodes for a key (traversing clockwise).
+     * Used for replication - returns primary + replica nodes.
+     */
+    public List<String> getNodesForKey(String key, int count) {
+        if (ring.isEmpty()) {
+            return Collections.emptyList();
+        }
         
-        hash_value = self._hash(key)
+        long hashValue = hash(key);
+        List<String> nodes = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
         
-        # Find position in ring
-        idx = bisect.bisect(self.ring, (hash_value, ''))
+        // Get entries starting from hash position (clockwise)
+        SortedMap<Long, String> tailMap = ring.tailMap(hashValue);
         
-        # Collect unique nodes clockwise
-        nodes = []
-        seen = set()
+        // First check entries after hash position
+        for (String node : tailMap.values()) {
+            if (!seen.contains(node)) {
+                nodes.add(node);
+                seen.add(node);
+                if (nodes.size() == count) break;
+            }
+        }
         
-        for i in range(len(self.ring)):
-            pos = (idx + i) % len(self.ring)
-            node = self.ring[pos][1]
+        // Wrap around to beginning if needed
+        if (nodes.size() < count) {
+            for (String node : ring.values()) {
+                if (!seen.contains(node)) {
+                    nodes.add(node);
+                    seen.add(node);
+                    if (nodes.size() == count) break;
+                }
+            }
+        }
+        
+        return nodes;
+    }
+}
+
+/**
+ * Distributed Key-Value Store with tunable consistency.
+ * Supports quorum reads/writes and automatic replication.
+ */
+public class DistributedKVStore {
+    
+    private final String nodeId;
+    private final ConsistentHashRing hashRing;
+    private final LSMTreeStorage localStorage;
+    private final Map<String, NodeConnection> nodeConnections;
+    
+    private final int replicationFactor;  // N
+    private final int writeQuorum;        // W
+    private final int readQuorum;         // R
+    // Consistency guarantee: R + W > N ensures strong consistency
+    
+    public DistributedKVStore(String nodeId, List<String> allNodes, 
+                              int replicationFactor, int writeQuorum, int readQuorum) {
+        this.nodeId = nodeId;
+        this.replicationFactor = replicationFactor;
+        this.writeQuorum = writeQuorum;
+        this.readQuorum = readQuorum;
+        this.hashRing = new ConsistentHashRing(allNodes, 150);
+        this.localStorage = new LSMTreeStorage();
+        this.nodeConnections = allNodes.stream()
+            .collect(Collectors.toMap(n -> n, NodeConnection::new));
+    }
+    
+    /**
+     * Store a key-value pair with optional TTL.
+     * Writes to W replicas before returning success.
+     */
+    public CompletableFuture<Boolean> put(String key, Object value, Duration ttl) {
+        List<String> replicas = hashRing.getNodesForKey(key, replicationFactor);
+        
+        VersionedValue versionedValue = new VersionedValue(
+            value,
+            Instant.now(),
+            generateVersion(),
+            ttl
+        );
+        
+        // Write to all replicas in parallel
+        List<CompletableFuture<Boolean>> writeFutures = replicas.stream()
+            .map(replica -> {
+                if (replica.equals(nodeId)) {
+                    return localPut(key, versionedValue);
+                } else {
+                    return remotePut(replica, key, versionedValue);
+                }
+            })
+            .collect(Collectors.toList());
+        
+        // Wait for quorum acknowledgments
+        return CompletableFuture.supplyAsync(() -> {
+            int successCount = 0;
+            for (CompletableFuture<Boolean> future : writeFutures) {
+                try {
+                    if (future.get(5, TimeUnit.SECONDS)) {
+                        successCount++;
+                    }
+                } catch (Exception e) {
+                    // Write to this replica failed
+                }
+            }
+            return successCount >= writeQuorum;
+        });
+    }
+    
+    /**
+     * Retrieve a value by key with quorum read.
+     * Performs read repair if replicas have inconsistent data.
+     */
+    public CompletableFuture<Optional<Object>> get(String key) {
+        List<String> replicas = hashRing.getNodesForKey(key, replicationFactor);
+        
+        // Read from R replicas
+        List<CompletableFuture<VersionedValue>> readFutures = 
+            replicas.subList(0, Math.min(readQuorum, replicas.size())).stream()
+                .map(replica -> {
+                    if (replica.equals(nodeId)) {
+                        return localGet(key);
+                    } else {
+                        return remoteGet(replica, key);
+                    }
+                })
+                .collect(Collectors.toList());
+        
+        return CompletableFuture.supplyAsync(() -> {
+            List<VersionedValue> results = new ArrayList<>();
             
-            if node not in seen:
-                nodes.append(node)
-                seen.add(node)
-                
-                if len(nodes) == count:
-                    break
-        
-        return nodes
-
-
-class DistributedKVStore:
-    """Main distributed key-value store."""
-    
-    def __init__(self, node_id: str, nodes: List[str], 
-                 replication_factor: int = 3):
-        self.node_id = node_id
-        self.replication_factor = replication_factor
-        self.hash_ring = ConsistentHashRing(nodes)
-        
-        # Local storage (LSM tree abstraction)
-        self.storage = LSMTreeStorage()
-        
-        # Replication configuration
-        self.write_quorum = 2  # W
-        self.read_quorum = 2   # R
-        # Guarantee: R + W > N ensures consistency
-        
-        # Node connections
-        self.node_connections = {n: NodeConnection(n) for n in nodes}
-    
-    async def put(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
-        """
-        Store key-value pair with optional TTL.
-        
-        Args:
-            key: Key to store
-            value: Value to store
-            ttl: Time to live in seconds (optional)
-        
-        Returns:
-            True if write succeeded (quorum reached)
-        """
-        # Find replica nodes
-        replicas = self.hash_ring.get_nodes(key, self.replication_factor)
-        
-        # Create versioned value
-        versioned_value = VersionedValue(
-            value=value,
-            timestamp=datetime.now(),
-            version=self._generate_version(),
-            ttl=ttl
-        )
-        
-        # Write to all replicas in parallel
-        write_tasks = []
-        for replica in replicas:
-            if replica == self.node_id:
-                # Local write
-                task = self._local_put(key, versioned_value)
-            else:
-                # Remote write
-                task = self._remote_put(replica, key, versioned_value)
+            for (CompletableFuture<VersionedValue> future : readFutures) {
+                try {
+                    VersionedValue value = future.get(5, TimeUnit.SECONDS);
+                    if (value != null) {
+                        results.add(value);
+                    }
+                } catch (Exception e) {
+                    // Read from this replica failed
+                }
+            }
             
-            write_tasks.append(task)
-        
-        # Wait for quorum
-        results = await asyncio.gather(*write_tasks, return_exceptions=True)
-        
-        # Count successful writes
-        success_count = sum(1 for r in results if r is True)
-        
-        if success_count >= self.write_quorum:
-            # Quorum reached
-            return True
-        else:
-            # Quorum not reached - rollback or retry
-            await self._handle_write_failure(key, replicas)
-            return False
-    
-    async def get(self, key: str) -> Optional[Any]:
-        """
-        Retrieve value by key with quorum read.
-        
-        Returns:
-            Value if found, None otherwise
-        """
-        # Find replica nodes
-        replicas = self.hash_ring.get_nodes(key, self.replication_factor)
-        
-        # Read from R replicas in parallel
-        read_tasks = []
-        for i, replica in enumerate(replicas[:self.read_quorum]):
-            if replica == self.node_id:
-                task = self._local_get(key)
-            else:
-                task = self._remote_get(replica, key)
+            if (results.isEmpty()) {
+                return Optional.empty();
+            }
             
-            read_tasks.append(task)
-        
-        # Wait for quorum responses
-        results = await asyncio.gather(*read_tasks, return_exceptions=True)
-        
-        # Filter valid results
-        valid_results = [r for r in results if isinstance(r, VersionedValue)]
-        
-        if not valid_results:
-            return None
-        
-        # Resolve conflicts (last-write-wins)
-        latest = max(valid_results, key=lambda v: v.timestamp)
-        
-        # Check TTL
-        if latest.ttl and latest.is_expired():
-            await self.delete(key)
-            return None
-        
-        # Read repair if needed
-        if len(set(r.version for r in valid_results)) > 1:
-            await self._read_repair(key, latest, replicas)
-        
-        return latest.value
-    
-    async def delete(self, key: str) -> bool:
-        """Delete key-value pair."""
-        # Use tombstone for eventual consistency
-        tombstone = VersionedValue(
-            value=None,
-            timestamp=datetime.now(),
-            version=self._generate_version(),
-            is_tombstone=True
-        )
-        
-        return await self.put(key, tombstone)
-    
-    async def _local_put(self, key: str, value: VersionedValue) -> bool:
-        """Write to local storage."""
-        try:
-            self.storage.put(key, value)
-            return True
-        except Exception as e:
-            print(f"Local write failed: {e}")
-            return False
-    
-    async def _local_get(self, key: str) -> Optional[VersionedValue]:
-        """Read from local storage."""
-        return self.storage.get(key)
-    
-    async def _remote_put(self, node: str, key: str, 
-                         value: VersionedValue) -> bool:
-        """Write to remote node."""
-        try:
-            conn = self.node_connections[node]
-            return await conn.put(key, value)
-        except Exception as e:
-            print(f"Remote write to {node} failed: {e}")
-            return False
-    
-    async def _remote_get(self, node: str, key: str) -> Optional[VersionedValue]:
-        """Read from remote node."""
-        try:
-            conn = self.node_connections[node]
-            return await conn.get(key)
-        except Exception as e:
-            print(f"Remote read from {node} failed: {e}")
-            return None
-    
-    async def _read_repair(self, key: str, correct_value: VersionedValue, 
-                          replicas: List[str]):
-        """Repair stale replicas with correct value."""
-        for replica in replicas:
-            if replica == self.node_id:
-                continue
+            // Resolve conflicts - last-write-wins
+            VersionedValue latest = results.stream()
+                .max(Comparator.comparing(VersionedValue::getTimestamp))
+                .orElse(null);
             
-            # Write correct value to replica
-            await self._remote_put(replica, key, correct_value)
+            // Check TTL expiration
+            if (latest != null && latest.isExpired()) {
+                delete(key);
+                return Optional.empty();
+            }
+            
+            // Read repair if versions differ
+            Set<String> versions = results.stream()
+                .map(VersionedValue::getVersion)
+                .collect(Collectors.toSet());
+            
+            if (versions.size() > 1 && latest != null) {
+                readRepair(key, latest, replicas);
+            }
+            
+            return Optional.ofNullable(latest != null ? latest.getValue() : null);
+        });
+    }
     
-    def _generate_version(self) -> str:
-        """Generate version using vector clock or timestamp."""
-        return f"{self.node_id}:{datetime.now().timestamp()}"
+    /**
+     * Delete a key using tombstone for eventual consistency.
+     */
+    public CompletableFuture<Boolean> delete(String key) {
+        VersionedValue tombstone = new VersionedValue(
+            null, Instant.now(), generateVersion(), null, true
+        );
+        return put(key, tombstone, null);
+    }
+    
+    private CompletableFuture<Boolean> localPut(String key, VersionedValue value) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                localStorage.put(key, value);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        });
+    }
+    
+    private CompletableFuture<VersionedValue> localGet(String key) {
+        return CompletableFuture.supplyAsync(() -> localStorage.get(key));
+    }
+    
+    private CompletableFuture<Boolean> remotePut(String node, String key, 
+                                                  VersionedValue value) {
+        return nodeConnections.get(node).put(key, value);
+    }
+    
+    private CompletableFuture<VersionedValue> remoteGet(String node, String key) {
+        return nodeConnections.get(node).get(key);
+    }
+    
+    private void readRepair(String key, VersionedValue correctValue, 
+                           List<String> replicas) {
+        // Asynchronously repair stale replicas
+        for (String replica : replicas) {
+            if (!replica.equals(nodeId)) {
+                remotePut(replica, key, correctValue);
+            }
+        }
+    }
+    
+    private String generateVersion() {
+        return nodeId + ":" + Instant.now().toEpochMilli();
+    }
+}
 
+/**
+ * Versioned value with timestamp, TTL, and tombstone support.
+ */
+@Data
+@AllArgsConstructor
+public class VersionedValue {
+    private Object value;
+    private Instant timestamp;
+    private String version;
+    private Duration ttl;
+    private boolean tombstone;
+    
+    public VersionedValue(Object value, Instant timestamp, String version, Duration ttl) {
+        this(value, timestamp, version, ttl, false);
+    }
+    
+    public boolean isExpired() {
+        if (ttl == null) return false;
+        return Instant.now().isAfter(timestamp.plus(ttl));
+    }
+}
 
-class VersionedValue:
-    """Value with version and metadata."""
+/**
+ * LSM Tree storage engine (simplified implementation).
+ * Provides high write throughput with log-structured storage.
+ */
+public class LSMTreeStorage {
     
-    def __init__(self, value: Any, timestamp: datetime, version: str,
-                 ttl: Optional[int] = None, is_tombstone: bool = False):
-        self.value = value
-        self.timestamp = timestamp
-        self.version = version
-        self.ttl = ttl
-        self.is_tombstone = is_tombstone
+    private final ConcurrentHashMap<String, VersionedValue> memtable = 
+        new ConcurrentHashMap<>();
+    private final List<SSTable> sstables = 
+        Collections.synchronizedList(new ArrayList<>());
+    private static final int MEMTABLE_SIZE_LIMIT = 1000;
     
-    def is_expired(self) -> bool:
-        """Check if value has expired."""
-        if not self.ttl:
-            return False
+    public void put(String key, VersionedValue value) {
+        memtable.put(key, value);
         
-        expiry = self.timestamp + timedelta(seconds=self.ttl)
-        return datetime.now() > expiry
+        if (memtable.size() >= MEMTABLE_SIZE_LIMIT) {
+            flushMemtable();
+        }
+    }
+    
+    public VersionedValue get(String key) {
+        // Check memtable first (most recent data)
+        VersionedValue value = memtable.get(key);
+        if (value != null) return value;
+        
+        // Check SSTables from newest to oldest
+        for (int i = sstables.size() - 1; i >= 0; i--) {
+            value = sstables.get(i).get(key);
+            if (value != null) return value;
+        }
+        
+        return null;
+    }
+    
+    private synchronized void flushMemtable() {
+        if (memtable.size() < MEMTABLE_SIZE_LIMIT) return;
+        
+        // Sort entries and create SSTable
+        Map<String, VersionedValue> sortedEntries = new TreeMap<>(memtable);
+        SSTable sstable = new SSTable(sortedEntries);
+        sstables.add(sstable);
+        
+        memtable.clear();
+        
+        // Trigger compaction if needed
+        if (sstables.size() > 5) {
+            compact();
+        }
+    }
+    
+    private synchronized void compact() {
+        // Merge all SSTables, keeping only latest versions
+        Map<String, VersionedValue> merged = new TreeMap<>();
+        
+        for (SSTable sstable : sstables) {
+            for (Map.Entry<String, VersionedValue> entry : sstable.entries()) {
+                String key = entry.getKey();
+                VersionedValue existing = merged.get(key);
+                if (existing == null || 
+                    entry.getValue().getTimestamp().isAfter(existing.getTimestamp())) {
+                    merged.put(key, entry.getValue());
+                }
+            }
+        }
+        
+        sstables.clear();
+        sstables.add(new SSTable(merged));
+    }
+}
 
+/**
+ * Sorted String Table - immutable on-disk storage structure.
+ */
+public class SSTable {
+    private final Map<String, VersionedValue> data;
+    
+    public SSTable(Map<String, VersionedValue> sortedData) {
+        this.data = new TreeMap<>(sortedData);
+    }
+    
+    public VersionedValue get(String key) {
+        return data.get(key);
+    }
+    
+    public Set<Map.Entry<String, VersionedValue>> entries() {
+        return data.entrySet();
+    }
+}
 
-class LSMTreeStorage:
-    """LSM Tree storage engine (simplified)."""
+/**
+ * Connection abstraction for remote node communication.
+ */
+public class NodeConnection {
+    private final String nodeAddress;
     
-    def __init__(self):
-        self.memtable = {}  # In-memory write buffer
-        self.sstables = []  # Sorted string tables on disk
-        self.memtable_size_limit = 1000
+    public NodeConnection(String nodeAddress) {
+        this.nodeAddress = nodeAddress;
+    }
     
-    def put(self, key: str, value: VersionedValue):
-        """Write to memtable."""
-        self.memtable[key] = value
-        
-        # Flush to disk if memtable is full
-        if len(self.memtable) >= self.memtable_size_limit:
-            self._flush_memtable()
+    public CompletableFuture<Boolean> put(String key, VersionedValue value) {
+        // RPC call implementation (gRPC, HTTP, or custom protocol)
+        return CompletableFuture.completedFuture(true);
+    }
     
-    def get(self, key: str) -> Optional[VersionedValue]:
-        """Read from memtable, then sstables."""
-        # Check memtable first
-        if key in self.memtable:
-            return self.memtable[key]
-        
-        # Check sstables (newest first)
-        for sstable in reversed(self.sstables):
-            value = sstable.get(key)
-            if value:
-                return value
-        
-        return None
-    
-    def _flush_memtable(self):
-        """Flush memtable to disk as SSTable."""
-        # Sort by key
-        sorted_items = sorted(self.memtable.items())
-        
-        # Create new SSTable
-        sstable = SSTable(sorted_items)
-        self.sstables.append(sstable)
-        
-        # Clear memtable
-        self.memtable = {}
-        
-        # Trigger compaction if needed
-        if len(self.sstables) > 5:
-            self._compact_sstables()
-    
-    def _compact_sstables(self):
-        """Merge and compact SSTables."""
-        # Simplified: merge all SSTables
-        all_items = {}
-        
-        for sstable in self.sstables:
-            for key, value in sstable.items():
-                # Keep latest version
-                if key not in all_items or value.timestamp > all_items[key].timestamp:
-                    all_items[key] = value
-        
-        # Create new compacted SSTable
-        sorted_items = sorted(all_items.items())
-        compacted = SSTable(sorted_items)
-        
-        # Replace old SSTables
-        self.sstables = [compacted]
-
-
-class SSTable:
-    """Sorted String Table (on-disk storage)."""
-    
-    def __init__(self, items: List[Tuple[str, VersionedValue]]):
-        self.items = dict(items)
-        # In real implementation, would write to disk with bloom filter
-    
-    def get(self, key: str) -> Optional[VersionedValue]:
-        return self.items.get(key)
-
-
-class NodeConnection:
-    """Connection to remote node."""
-    
-    def __init__(self, node_address: str):
-        self.address = node_address
-    
-    async def put(self, key: str, value: VersionedValue) -> bool:
-        # RPC call to remote node
-        # Implementation would use gRPC, HTTP, or custom protocol
-        pass
-    
-    async def get(self, key: str) -> Optional[VersionedValue]:
-        # RPC call to remote node
-        pass
+    public CompletableFuture<VersionedValue> get(String key) {
+        // RPC call implementation
+        return CompletableFuture.completedFuture(null);
+    }
+}
 ```
 
 **Gossip Protocol for Membership**:
 
-```python
-import random
-import time
+```java
+import java.util.*;
+import java.util.concurrent.*;
+import java.time.Instant;
 
-class GossipMembership:
-    """Gossip protocol for node membership and failure detection."""
+/**
+ * Gossip protocol implementation for cluster membership management
+ * and failure detection in distributed systems.
+ */
+public class GossipMembership {
     
-    def __init__(self, node_id: str, seed_nodes: List[str]):
-        self.node_id = node_id
-        self.nodes = {}  # node_id -> NodeState
-        self.heartbeat_interval = 1  # seconds
-        self.gossip_fanout = 3  # gossip to N random nodes
+    private final String nodeId;
+    private final ConcurrentMap<String, NodeState> nodes = new ConcurrentHashMap<>();
+    private final int heartbeatIntervalMs;
+    private final int gossipFanout;
+    private final int failureTimeoutMs;
+    private final ScheduledExecutorService scheduler;
+    private final Random random = new Random();
+    
+    public GossipMembership(String nodeId, List<String> seedNodes, 
+                            int heartbeatIntervalMs, int gossipFanout, 
+                            int failureTimeoutMs) {
+        this.nodeId = nodeId;
+        this.heartbeatIntervalMs = heartbeatIntervalMs;
+        this.gossipFanout = gossipFanout;
+        this.failureTimeoutMs = failureTimeoutMs;
+        this.scheduler = Executors.newScheduledThreadPool(2);
         
-        # Initialize with seed nodes
-        for node in seed_nodes:
-            self.nodes[node] = NodeState(node, is_alive=True)
+        // Initialize with seed nodes
+        for (String seed : seedNodes) {
+            nodes.put(seed, new NodeState(seed, true));
+        }
+        nodes.put(nodeId, new NodeState(nodeId, true));
+    }
+    
+    /**
+     * Start the gossip protocol background threads.
+     */
+    public void start() {
+        // Schedule periodic gossip
+        scheduler.scheduleAtFixedRate(
+            this::gossipRound,
+            0,
+            heartbeatIntervalMs,
+            TimeUnit.MILLISECONDS
+        );
         
-        self.nodes[node_id] = NodeState(node_id, is_alive=True)
+        // Schedule failure detection
+        scheduler.scheduleAtFixedRate(
+            this::detectFailures,
+            heartbeatIntervalMs,
+            heartbeatIntervalMs,
+            TimeUnit.MILLISECONDS
+        );
+    }
     
-    async def start_gossip(self):
-        """Start gossip protocol."""
-        while True:
-            await asyncio.sleep(self.heartbeat_interval)
-            
-            # Increment own heartbeat
-            self.nodes[self.node_id].increment_heartbeat()
-            
-            # Select random nodes to gossip
-            gossip_targets = self._select_gossip_targets()
-            
-            # Send gossip to targets
-            for target in gossip_targets:
-                await self._send_gossip(target)
-            
-            # Detect failures
-            self._detect_failures()
-    
-    def _select_gossip_targets(self) -> List[str]:
-        """Select random nodes for gossip."""
-        alive_nodes = [n for n, s in self.nodes.items() 
-                      if s.is_alive and n != self.node_id]
+    /**
+     * Execute one round of gossip protocol.
+     */
+    private void gossipRound() {
+        // Increment own heartbeat
+        NodeState self = nodes.get(nodeId);
+        self.incrementHeartbeat();
         
-        count = min(self.gossip_fanout, len(alive_nodes))
-        return random.sample(alive_nodes, count)
-    
-    async def _send_gossip(self, target: str):
-        """Send gossip message to target node."""
-        message = GossipMessage(
-            sender=self.node_id,
-            node_states=self.nodes
-        )
+        // Select random nodes to gossip with
+        List<String> targets = selectGossipTargets();
         
-        # Send via network (RPC)
-        # await rpc_call(target, message)
-        pass
+        // Send gossip to each target
+        for (String target : targets) {
+            sendGossip(target);
+        }
+    }
     
-    def receive_gossip(self, message: GossipMessage):
-        """Process received gossip message."""
-        for node_id, remote_state in message.node_states.items():
-            if node_id not in self.nodes:
-                # New node discovered
-                self.nodes[node_id] = remote_state
-            else:
-                # Merge states (keep higher heartbeat)
-                local_state = self.nodes[node_id]
-                if remote_state.heartbeat > local_state.heartbeat:
-                    self.nodes[node_id] = remote_state
-    
-    def _detect_failures(self):
-        """Detect failed nodes based on heartbeat timeouts."""
-        now = time.time()
-        timeout = 10  # seconds
+    /**
+     * Select random alive nodes for gossiping.
+     */
+    private List<String> selectGossipTargets() {
+        List<String> aliveNodes = nodes.entrySet().stream()
+            .filter(e -> e.getValue().isAlive() && !e.getKey().equals(nodeId))
+            .map(Map.Entry::getKey)
+            .collect(Collectors.toList());
         
-        for node_id, state in self.nodes.items():
-            if node_id == self.node_id:
-                continue
+        Collections.shuffle(aliveNodes, random);
+        
+        int count = Math.min(gossipFanout, aliveNodes.size());
+        return aliveNodes.subList(0, count);
+    }
+    
+    /**
+     * Send gossip message to target node.
+     */
+    private void sendGossip(String target) {
+        GossipMessage message = new GossipMessage(nodeId, new HashMap<>(nodes));
+        
+        // Send via network (RPC call)
+        // networkClient.sendGossip(target, message);
+    }
+    
+    /**
+     * Process received gossip message and merge state.
+     */
+    public void receiveGossip(GossipMessage message) {
+        for (Map.Entry<String, NodeState> entry : message.getNodeStates().entrySet()) {
+            String remoteNodeId = entry.getKey();
+            NodeState remoteState = entry.getValue();
             
-            if state.is_alive and (now - state.last_update) > timeout:
-                # Node suspected as failed
-                state.is_alive = False
-                print(f"Node {node_id} marked as failed")
-                
-                # Trigger rebalancing
-                self._handle_node_failure(node_id)
+            NodeState localState = nodes.get(remoteNodeId);
+            
+            if (localState == null) {
+                // New node discovered
+                nodes.put(remoteNodeId, remoteState.copy());
+                System.out.println("Discovered new node: " + remoteNodeId);
+            } else if (remoteState.getHeartbeat() > localState.getHeartbeat()) {
+                // Remote has newer information
+                localState.update(remoteState);
+            }
+        }
+    }
     
-    def _handle_node_failure(self, failed_node: str):
-        """Handle node failure - rebalance data."""
-        # Remove from hash ring
-        # Redistribute data to other nodes
-        pass
+    /**
+     * Detect failed nodes based on heartbeat timeout.
+     */
+    private void detectFailures() {
+        long now = System.currentTimeMillis();
+        
+        for (Map.Entry<String, NodeState> entry : nodes.entrySet()) {
+            String targetNodeId = entry.getKey();
+            NodeState state = entry.getValue();
+            
+            if (targetNodeId.equals(nodeId)) continue;
+            
+            if (state.isAlive() && 
+                (now - state.getLastUpdateMs()) > failureTimeoutMs) {
+                // Node suspected as failed
+                state.markAsFailed();
+                System.out.println("Node " + targetNodeId + " marked as FAILED");
+                handleNodeFailure(targetNodeId);
+            }
+        }
+    }
+    
+    /**
+     * Handle node failure - trigger data rebalancing.
+     */
+    private void handleNodeFailure(String failedNode) {
+        // Remove from hash ring
+        // Trigger data redistribution
+        // Notify other components
+    }
+    
+    /**
+     * Get all alive nodes in the cluster.
+     */
+    public List<String> getAliveNodes() {
+        return nodes.entrySet().stream()
+            .filter(e -> e.getValue().isAlive())
+            .map(Map.Entry::getKey)
+            .collect(Collectors.toList());
+    }
+    
+    public void shutdown() {
+        scheduler.shutdown();
+    }
+}
 
+/**
+ * State of a node in the cluster.
+ */
+public class NodeState {
+    private final String nodeId;
+    private volatile boolean alive;
+    private volatile long heartbeat;
+    private volatile long lastUpdateMs;
+    
+    public NodeState(String nodeId, boolean alive) {
+        this.nodeId = nodeId;
+        this.alive = alive;
+        this.heartbeat = 0;
+        this.lastUpdateMs = System.currentTimeMillis();
+    }
+    
+    public synchronized void incrementHeartbeat() {
+        this.heartbeat++;
+        this.lastUpdateMs = System.currentTimeMillis();
+    }
+    
+    public synchronized void update(NodeState other) {
+        this.heartbeat = other.heartbeat;
+        this.lastUpdateMs = System.currentTimeMillis();
+        this.alive = true;  // Receiving updates means node is alive
+    }
+    
+    public synchronized void markAsFailed() {
+        this.alive = false;
+    }
+    
+    public NodeState copy() {
+        NodeState copy = new NodeState(nodeId, alive);
+        copy.heartbeat = this.heartbeat;
+        copy.lastUpdateMs = this.lastUpdateMs;
+        return copy;
+    }
+    
+    // Getters
+    public String getNodeId() { return nodeId; }
+    public boolean isAlive() { return alive; }
+    public long getHeartbeat() { return heartbeat; }
+    public long getLastUpdateMs() { return lastUpdateMs; }
+}
 
-class NodeState:
-    """State of a node in the cluster."""
-    
-    def __init__(self, node_id: str, is_alive: bool = True):
-        self.node_id = node_id
-        self.is_alive = is_alive
-        self.heartbeat = 0
-        self.last_update = time.time()
-    
-    def increment_heartbeat(self):
-        """Increment heartbeat counter."""
-        self.heartbeat += 1
-        self.last_update = time.time()
+/**
+ * Gossip message exchanged between nodes.
+ */
+@Data
+@AllArgsConstructor
+public class GossipMessage {
+    private String senderId;
+    private Map<String, NodeState> nodeStates;
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -809,295 +988,357 @@ payments (
 
 **Booking Service Implementation**:
 
-```python
-class BookingService:
-    """Handle movie ticket bookings with concurrency control."""
+```java
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import java.time.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+/**
+ * Movie ticket booking service with distributed locking and
+ * database-level concurrency control for double-booking prevention.
+ */
+@Service
+public class BookingService {
     
-    def __init__(self, db, redis, payment_service):
-        self.db = db
-        self.redis = redis
-        self.payment = payment_service
-        self.hold_duration = 600  # 10 minutes in seconds
+    private final JdbcTemplate db;
+    private final RedisTemplate<String, String> redis;
+    private final PaymentService paymentService;
+    private final TicketGeneratorService ticketService;
     
-    async def hold_seats(self, show_id: int, seat_ids: List[int], 
-                        session_id: str) -> Dict:
-        """
-        Hold seats for a user temporarily.
-        
-        Uses distributed lock + database row lock for double booking prevention.
-        """
-        # Generate lock key
-        lock_key = f"booking:show:{show_id}:seats:{','.join(map(str, seat_ids))}"
-        
-        # Acquire distributed lock (prevents concurrent attempts)
-        lock_acquired = await self._acquire_distributed_lock(lock_key, session_id)
-        
-        if not lock_acquired:
-            return {
-                'success': False,
-                'error': 'CONCURRENT_BOOKING',
-                'message': 'Someone else is booking these seats'
-            }
-        
-        try:
-            # Database transaction with row-level locking
-            async with self.db.transaction(isolation='serializable'):
-                # Lock seats (NOWAIT fails immediately if locked)
-                query = """
-                SELECT id, status, held_by, held_until
-                FROM seats
-                WHERE show_id = $1 AND id = ANY($2)
-                FOR UPDATE NOWAIT
-                """
-                
-                try:
-                    seats = await self.db.fetch(query, show_id, seat_ids)
-                except asyncpg.exceptions.LockNotAvailableError:
-                    return {
-                        'success': False,
-                        'error': 'SEATS_LOCKED',
-                        'message': 'Seats are being booked by another user'
-                    }
-                
-                # Validate all seats are available
-                for seat in seats:
-                    if seat['status'] == 'booked':
-                        return {
-                            'success': False,
-                            'error': 'SEATS_ALREADY_BOOKED',
-                            'message': f"Seat {seat['id']} is already booked"
-                        }
-                    
-                    if seat['status'] == 'held' and seat['held_by'] != session_id:
-                        # Check if hold expired
-                        if seat['held_until'] > datetime.now():
-                            return {
-                                'success': False,
-                                'error': 'SEATS_HELD',
-                                'message': f"Seat {seat['id']} is held by another user"
-                            }
-                
-                # Hold seats
-                held_until = datetime.now() + timedelta(seconds=self.hold_duration)
-                
-                update_query = """
-                UPDATE seats
-                SET status = 'held',
-                    held_by = $1,
-                    held_until = $2
-                WHERE show_id = $3 AND id = ANY($4)
-                """
-                
-                await self.db.execute(update_query, session_id, held_until, 
-                                     show_id, seat_ids)
-                
-                # Commit transaction
-                # Locks released automatically on commit
-                
-                return {
-                    'success': True,
-                    'held_until': held_until.isoformat(),
-                    'hold_duration': self.hold_duration
-                }
-        
-        finally:
-            # Release distributed lock
-            await self._release_distributed_lock(lock_key, session_id)
+    private static final int HOLD_DURATION_SECONDS = 600; // 10 minutes
+    private static final Duration LOCK_EXPIRY = Duration.ofSeconds(30);
     
-    async def confirm_booking(self, show_id: int, seat_ids: List[int],
-                             session_id: str, user_id: int,
-                             payment_details: Dict) -> Dict:
-        """
-        Confirm booking with payment processing.
-        
-        Implements Saga pattern for distributed transaction.
-        """
-        booking_id = str(uuid.uuid4())
-        
-        try:
-            # Step 1: Verify seats still held by this session
-            async with self.db.transaction(isolation='serializable'):
-                verify_query = """
-                SELECT id, price, status, held_by
-                FROM seats
-                WHERE show_id = $1 AND id = ANY($2)
-                FOR UPDATE
-                """
-                
-                seats = await self.db.fetch(verify_query, show_id, seat_ids)
-                
-                # Validate ownership and status
-                for seat in seats:
-                    if seat['status'] != 'held' or seat['held_by'] != session_id:
-                        raise BookingError('SEATS_NOT_HELD', 
-                                         'Seats no longer held by this session')
-                
-                total_amount = sum(seat['price'] for seat in seats)
-                
-                # Create booking record (pending)
-                booking_query = """
-                INSERT INTO bookings 
-                (id, user_id, show_id, seat_ids, total_amount, status)
-                VALUES ($1, $2, $3, $4, $5, 'pending')
-                RETURNING confirmation_code
-                """
-                
-                result = await self.db.fetchrow(
-                    booking_query, booking_id, user_id, show_id, 
-                    seat_ids, total_amount
-                )
-                
-                confirmation_code = result['confirmation_code']
-            
-            # Step 2: Process payment (external service)
-            try:
-                payment_result = await self.payment.charge(
-                    amount=total_amount,
-                    currency='USD',
-                    payment_method=payment_details,
-                    metadata={'booking_id': booking_id}
-                )
-                
-                if not payment_result['success']:
-                    raise PaymentError(payment_result['error'])
-                
-                payment_id = payment_result['transaction_id']
-            
-            except PaymentError as e:
-                # Payment failed - rollback booking
-                await self._rollback_booking(booking_id, show_id, seat_ids)
-                
-                return {
-                    'success': False,
-                    'error': 'PAYMENT_FAILED',
-                    'message': str(e)
-                }
-            
-            # Step 3: Finalize booking
-            async with self.db.transaction():
-                # Update seats to booked
-                update_seats_query = """
-                UPDATE seats
-                SET status = 'booked',
-                    held_by = NULL,
-                    held_until = NULL
-                WHERE show_id = $1 AND id = ANY($2)
-                """
-                
-                await self.db.execute(update_seats_query, show_id, seat_ids)
-                
-                # Update booking status
-                update_booking_query = """
-                UPDATE bookings
-                SET status = 'confirmed',
-                    payment_id = $1
-                WHERE id = $2
-                """
-                
-                await self.db.execute(update_booking_query, payment_id, booking_id)
-                
-                # Record payment
-                payment_query = """
-                INSERT INTO payments
-                (booking_id, amount, payment_method, gateway_transaction_id, status)
-                VALUES ($1, $2, $3, $4, 'success')
-                """
-                
-                await self.db.execute(
-                    payment_query, booking_id, total_amount,
-                    payment_details['method'], payment_id
-                )
-            
-            # Step 4: Generate ticket (async)
-            asyncio.create_task(
-                self._generate_and_send_ticket(booking_id, user_id)
-            )
-            
-            return {
-                'success': True,
-                'booking_id': booking_id,
-                'confirmation_code': confirmation_code,
-                'total_amount': float(total_amount)
-            }
-        
-        except BookingError as e:
-            return {
-                'success': False,
-                'error': e.code,
-                'message': e.message
-            }
-        
-        except Exception as e:
-            # Unexpected error - attempt rollback
-            await self._rollback_booking(booking_id, show_id, seat_ids)
-            raise
-    
-    async def _rollback_booking(self, booking_id: str, show_id: int, 
-                               seat_ids: List[int]):
-        """Rollback booking in case of failure."""
-        async with self.db.transaction():
-            # Release seats
-            await self.db.execute("""
-                UPDATE seats
-                SET status = 'available',
-                    held_by = NULL,
-                    held_until = NULL
-                WHERE show_id = $1 AND id = ANY($2)
-            """, show_id, seat_ids)
-            
-            # Mark booking as cancelled
-            await self.db.execute("""
-                UPDATE bookings
-                SET status = 'cancelled'
-                WHERE id = $1
-            """, booking_id)
-    
-    async def release_expired_holds(self):
-        """Background job to release expired seat holds."""
-        while True:
-            await asyncio.sleep(60)  # Run every minute
-            
-            async with self.db.transaction():
-                # Find expired holds
-                expired = await self.db.fetch("""
-                    SELECT DISTINCT show_id, ARRAY_AGG(id) as seat_ids
-                    FROM seats
-                    WHERE status = 'held' AND held_until < NOW()
-                    GROUP BY show_id
-                """)
-                
-                for row in expired:
-                    # Release seats
-                    await self.db.execute("""
-                        UPDATE seats
-                        SET status = 'available',
-                            held_by = NULL,
-                            held_until = NULL
-                        WHERE show_id = $1 AND id = ANY($2)
-                    """, row['show_id'], row['seat_ids'])
-                    
-                    print(f"Released {len(row['seat_ids'])} expired holds for show {row['show_id']}")
-    
-    async def _acquire_distributed_lock(self, key: str, value: str) -> bool:
-        """Acquire distributed lock using Redis."""
-        result = await self.redis.set(
-            key, value,
-            nx=True,  # Only set if not exists
-            ex=30     # 30 second expiry
-        )
-        return result is not None
-    
-    async def _release_distributed_lock(self, key: str, value: str):
-        """Release distributed lock."""
-        # Lua script ensures we only delete if we own the lock
-        script = """
+    // Lua script for safe lock release
+    private static final String RELEASE_LOCK_SCRIPT = """
         if redis.call("GET", KEYS[1]) == ARGV[1] then
             return redis.call("DEL", KEYS[1])
         else
             return 0
         end
-        """
-        await self.redis.eval(script, 1, key, value)
+        """;
+    
+    @Autowired
+    public BookingService(JdbcTemplate db, 
+                          RedisTemplate<String, String> redis,
+                          PaymentService paymentService,
+                          TicketGeneratorService ticketService) {
+        this.db = db;
+        this.redis = redis;
+        this.paymentService = paymentService;
+        this.ticketService = ticketService;
+    }
+    
+    /**
+     * Hold seats temporarily for a user.
+     * Uses distributed lock + database row lock for double-booking prevention.
+     */
+    @Transactional(isolation = Isolation.SERIALIZABLE)
+    public HoldResult holdSeats(long showId, List<Long> seatIds, String sessionId) {
+        // Generate lock key for these specific seats
+        String lockKey = buildLockKey(showId, seatIds);
+        
+        // Step 1: Acquire distributed lock (prevents concurrent attempts)
+        boolean lockAcquired = acquireDistributedLock(lockKey, sessionId);
+        if (!lockAcquired) {
+            return HoldResult.failure("CONCURRENT_BOOKING", 
+                "Someone else is booking these seats");
+        }
+        
+        try {
+            // Step 2: Database transaction with row-level locking
+            // NOWAIT fails immediately if rows are locked
+            String selectQuery = """
+                SELECT id, status, held_by, held_until
+                FROM seats
+                WHERE show_id = ? AND id = ANY(?)
+                FOR UPDATE NOWAIT
+                """;
+            
+            List<SeatRow> seats;
+            try {
+                seats = db.query(selectQuery, 
+                    new SeatRowMapper(), showId, seatIds.toArray(new Long[0]));
+            } catch (CannotAcquireLockException e) {
+                return HoldResult.failure("SEATS_LOCKED", 
+                    "Seats are being booked by another user");
+            }
+            
+            // Step 3: Validate all seats are available
+            for (SeatRow seat : seats) {
+                if ("booked".equals(seat.getStatus())) {
+                    return HoldResult.failure("SEATS_ALREADY_BOOKED",
+                        "Seat " + seat.getId() + " is already booked");
+                }
+                
+                if ("held".equals(seat.getStatus()) && 
+                    !sessionId.equals(seat.getHeldBy())) {
+                    // Check if hold has expired
+                    if (seat.getHeldUntil() != null && 
+                        seat.getHeldUntil().isAfter(Instant.now())) {
+                        return HoldResult.failure("SEATS_HELD",
+                            "Seat " + seat.getId() + " is held by another user");
+                    }
+                }
+            }
+            
+            // Step 4: Hold the seats
+            Instant heldUntil = Instant.now().plusSeconds(HOLD_DURATION_SECONDS);
+            
+            String updateQuery = """
+                UPDATE seats
+                SET status = 'held',
+                    held_by = ?,
+                    held_until = ?
+                WHERE show_id = ? AND id = ANY(?)
+                """;
+            
+            db.update(updateQuery, sessionId, 
+                Timestamp.from(heldUntil), showId, seatIds.toArray(new Long[0]));
+            
+            return HoldResult.success(heldUntil, HOLD_DURATION_SECONDS);
+            
+        } finally {
+            // Always release distributed lock
+            releaseDistributedLock(lockKey, sessionId);
+        }
+    }
+    
+    /**
+     * Confirm booking with payment processing.
+     * Implements Saga pattern for distributed transaction handling.
+     */
+    @Transactional(isolation = Isolation.SERIALIZABLE)
+    public BookingResult confirmBooking(long showId, List<Long> seatIds,
+                                        String sessionId, long userId,
+                                        PaymentDetails paymentDetails) {
+        String bookingId = UUID.randomUUID().toString();
+        
+        try {
+            // Step 1: Verify seats still held by this session
+            String verifyQuery = """
+                SELECT id, price, status, held_by
+                FROM seats
+                WHERE show_id = ? AND id = ANY(?)
+                FOR UPDATE
+                """;
+            
+            List<SeatRow> seats = db.query(verifyQuery, 
+                new SeatRowMapper(), showId, seatIds.toArray(new Long[0]));
+            
+            // Validate ownership and status
+            for (SeatRow seat : seats) {
+                if (!"held".equals(seat.getStatus()) || 
+                    !sessionId.equals(seat.getHeldBy())) {
+                    throw new BookingException("SEATS_NOT_HELD",
+                        "Seats no longer held by this session");
+                }
+            }
+            
+            BigDecimal totalAmount = seats.stream()
+                .map(SeatRow::getPrice)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            
+            // Step 2: Create pending booking record
+            String insertBookingQuery = """
+                INSERT INTO bookings 
+                (id, user_id, show_id, seat_ids, total_amount, status)
+                VALUES (?, ?, ?, ?, ?, 'pending')
+                RETURNING confirmation_code
+                """;
+            
+            String confirmationCode = db.queryForObject(insertBookingQuery,
+                String.class, bookingId, userId, showId, 
+                seatIds.toArray(new Long[0]), totalAmount);
+            
+            // Step 3: Process payment (external service call)
+            PaymentResult paymentResult;
+            try {
+                paymentResult = paymentService.charge(
+                    totalAmount, "USD", paymentDetails,
+                    Map.of("booking_id", bookingId));
+                
+                if (!paymentResult.isSuccess()) {
+                    throw new PaymentException(paymentResult.getError());
+                }
+            } catch (PaymentException e) {
+                // Payment failed - rollback
+                rollbackBooking(bookingId, showId, seatIds);
+                return BookingResult.failure("PAYMENT_FAILED", e.getMessage());
+            }
+            
+            // Step 4: Finalize booking
+            // Update seats to booked
+            String updateSeatsQuery = """
+                UPDATE seats
+                SET status = 'booked',
+                    held_by = NULL,
+                    held_until = NULL
+                WHERE show_id = ? AND id = ANY(?)
+                """;
+            db.update(updateSeatsQuery, showId, seatIds.toArray(new Long[0]));
+            
+            // Update booking status
+            String updateBookingQuery = """
+                UPDATE bookings
+                SET status = 'confirmed',
+                    payment_id = ?
+                WHERE id = ?
+                """;
+            db.update(updateBookingQuery, paymentResult.getTransactionId(), bookingId);
+            
+            // Record payment
+            String insertPaymentQuery = """
+                INSERT INTO payments
+                (booking_id, amount, payment_method, gateway_transaction_id, status)
+                VALUES (?, ?, ?, ?, 'success')
+                """;
+            db.update(insertPaymentQuery, bookingId, totalAmount,
+                paymentDetails.getMethod(), paymentResult.getTransactionId());
+            
+            // Step 5: Generate ticket asynchronously
+            CompletableFuture.runAsync(() -> 
+                ticketService.generateAndSendTicket(bookingId, userId));
+            
+            return BookingResult.success(bookingId, confirmationCode, totalAmount);
+            
+        } catch (BookingException e) {
+            return BookingResult.failure(e.getCode(), e.getMessage());
+        } catch (Exception e) {
+            rollbackBooking(bookingId, showId, seatIds);
+            throw e;
+        }
+    }
+    
+    /**
+     * Rollback booking in case of failure.
+     */
+    private void rollbackBooking(String bookingId, long showId, List<Long> seatIds) {
+        // Release seats
+        String releaseSeatsQuery = """
+            UPDATE seats
+            SET status = 'available',
+                held_by = NULL,
+                held_until = NULL
+            WHERE show_id = ? AND id = ANY(?)
+            """;
+        db.update(releaseSeatsQuery, showId, seatIds.toArray(new Long[0]));
+        
+        // Mark booking as cancelled
+        String cancelBookingQuery = """
+            UPDATE bookings
+            SET status = 'cancelled'
+            WHERE id = ?
+            """;
+        db.update(cancelBookingQuery, bookingId);
+    }
+    
+    /**
+     * Background job to release expired seat holds.
+     * Should be scheduled to run every minute.
+     */
+    @Scheduled(fixedRate = 60000)
+    @Transactional
+    public void releaseExpiredHolds() {
+        String query = """
+            UPDATE seats
+            SET status = 'available',
+                held_by = NULL,
+                held_until = NULL
+            WHERE status = 'held' AND held_until < NOW()
+            RETURNING show_id, id
+            """;
+        
+        List<Map<String, Object>> released = db.queryForList(query);
+        
+        if (!released.isEmpty()) {
+            System.out.println("Released " + released.size() + " expired seat holds");
+        }
+    }
+    
+    private String buildLockKey(long showId, List<Long> seatIds) {
+        List<Long> sorted = new ArrayList<>(seatIds);
+        Collections.sort(sorted);
+        return String.format("booking:show:%d:seats:%s", 
+            showId, sorted.stream().map(String::valueOf).collect(Collectors.joining(",")));
+    }
+    
+    private boolean acquireDistributedLock(String key, String value) {
+        Boolean result = redis.opsForValue()
+            .setIfAbsent(key, value, LOCK_EXPIRY);
+        return Boolean.TRUE.equals(result);
+    }
+    
+    private void releaseDistributedLock(String key, String value) {
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(
+            RELEASE_LOCK_SCRIPT, Long.class);
+        redis.execute(script, Collections.singletonList(key), value);
+    }
+}
+
+/**
+ * Result of seat hold operation.
+ */
+@Data
+@Builder
+public class HoldResult {
+    private boolean success;
+    private String errorCode;
+    private String message;
+    private Instant heldUntil;
+    private int holdDurationSeconds;
+    
+    public static HoldResult success(Instant heldUntil, int duration) {
+        return HoldResult.builder()
+            .success(true)
+            .heldUntil(heldUntil)
+            .holdDurationSeconds(duration)
+            .build();
+    }
+    
+    public static HoldResult failure(String code, String message) {
+        return HoldResult.builder()
+            .success(false)
+            .errorCode(code)
+            .message(message)
+            .build();
+    }
+}
+
+/**
+ * Result of booking confirmation.
+ */
+@Data
+@Builder  
+public class BookingResult {
+    private boolean success;
+    private String errorCode;
+    private String message;
+    private String bookingId;
+    private String confirmationCode;
+    private BigDecimal totalAmount;
+    
+    public static BookingResult success(String bookingId, String confirmationCode,
+                                        BigDecimal totalAmount) {
+        return BookingResult.builder()
+            .success(true)
+            .bookingId(bookingId)
+            .confirmationCode(confirmationCode)
+            .totalAmount(totalAmount)
+            .build();
+    }
+    
+    public static BookingResult failure(String code, String message) {
+        return BookingResult.builder()
+            .success(false)
+            .errorCode(code)
+            .message(message)
+            .build();
+    }
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -1217,170 +1458,307 @@ GET /api/top-sellers/category/electronics?limit=20
 
 **Stream Processing (Flink)**:
 
-```python
-from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.window import TumblingProcessingTimeWindows
-from pyflink.common import Time
+```java
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
+import redis.clients.jedis.Jedis;
 
-def process_purchases_stream():
-    env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(3)
+/**
+ * Flink streaming job for real-time top sellers calculation.
+ * Processes purchase events and updates Redis sorted sets.
+ */
+public class TopSellersStreamJob {
     
-    # Source: Kafka
-    purchases_stream = env.add_source(
-        FlinkKafkaConsumer(
-            topics=['purchase-events'],
-            deserialization_schema=JsonDeserializationSchema(),
-            properties={'bootstrap.servers': 'kafka:9092'}
-        )
-    )
-    
-    # Extract product_id and category
-    product_counts = purchases_stream \
-        .map(lambda x: (x['product_id'], x['category'], 1)) \
-        .key_by(lambda x: x[0]) \
-        .window(TumblingProcessingTimeWindows.of(Time.minutes(5))) \
-        .sum(2)  # Sum counts
-    
-    # Update Redis sorted sets
-    product_counts.add_sink(RedisTopSellersSink())
-    
-    env.execute("Top Sellers Stream")
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = 
+            StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(3);
+        
+        // Source: Kafka purchase events
+        Properties kafkaProps = new Properties();
+        kafkaProps.setProperty("bootstrap.servers", "kafka:9092");
+        kafkaProps.setProperty("group.id", "top-sellers-consumer");
+        
+        FlinkKafkaConsumer<PurchaseEvent> kafkaSource = new FlinkKafkaConsumer<>(
+            "purchase-events",
+            new PurchaseEventDeserializer(),
+            kafkaProps
+        );
+        
+        DataStream<PurchaseEvent> purchases = env.addSource(kafkaSource);
+        
+        // Extract product info and count purchases
+        DataStream<Tuple3<String, String, Integer>> productCounts = purchases
+            .map(new MapFunction<PurchaseEvent, Tuple3<String, String, Integer>>() {
+                @Override
+                public Tuple3<String, String, Integer> map(PurchaseEvent event) {
+                    return Tuple3.of(event.getProductId(), event.getCategory(), 1);
+                }
+            })
+            .keyBy(tuple -> tuple.f0)  // Key by product_id
+            .timeWindow(Time.minutes(5))  // 5-minute tumbling window
+            .sum(2);  // Sum the counts
+        
+        // Update Redis sorted sets
+        productCounts.addSink(new RedisTopSellersSink());
+        
+        env.execute("Top Sellers Stream Processing");
+    }
+}
 
+/**
+ * Flink sink that updates Redis sorted sets for top sellers.
+ */
+public class RedisTopSellersSink extends RichSinkFunction<Tuple3<String, String, Integer>> {
+    
+    private transient Jedis redis;
+    
+    @Override
+    public void open(Configuration parameters) {
+        redis = new Jedis("redis", 6379);
+    }
+    
+    @Override
+    public void invoke(Tuple3<String, String, Integer> value, Context context) {
+        String productId = value.f0;
+        String category = value.f1;
+        int count = value.f2;
+        
+        // Update global top sellers
+        redis.zincrby("top:global:current", count, "product:" + productId);
+        
+        // Update category top sellers
+        redis.zincrby("top:category:" + category, count, "product:" + productId);
+        
+        // Calculate and store velocity (trending score)
+        double velocity = calculateVelocity(productId);
+        redis.zadd("trending:velocity", velocity, "product:" + productId);
+    }
+    
+    private double calculateVelocity(String productId) {
+        // Get current hour's count
+        String currentKey = "count:hour:current:" + productId;
+        String previousKey = "count:hour:previous:" + productId;
+        
+        String currentStr = redis.get(currentKey);
+        String previousStr = redis.get(previousKey);
+        
+        double currentCount = currentStr != null ? Double.parseDouble(currentStr) : 0;
+        double previousCount = previousStr != null ? Double.parseDouble(previousStr) : 1;
+        
+        // Velocity = current / previous (>1 means trending up)
+        return currentCount / previousCount;
+    }
+    
+    @Override
+    public void close() {
+        if (redis != null) {
+            redis.close();
+        }
+    }
+}
 
-class RedisTopSellersSink:
-    """Sink to update Redis sorted sets."""
-    
-    def __init__(self):
-        self.redis = redis.Redis(host='redis')
-    
-    def invoke(self, value, context):
-        product_id, category, count = value
-        
-        # Update global top sellers
-        self.redis.zincrby('top:global:current', count, f'product:{product_id}')
-        
-        # Update category top sellers
-        self.redis.zincrby(f'top:category:{category}', count, f'product:{product_id}')
-        
-        # Calculate velocity (trending)
-        # purchases in last hour / purchases in previous hour
-        velocity = self._calculate_velocity(product_id)
-        self.redis.zadd('trending:velocity', {f'product:{product_id}': velocity})
-    
-    def _calculate_velocity(self, product_id):
-        """Calculate trending velocity."""
-        current_hour = self.redis.get(f'count:hour:current:{product_id}') or 0
-        previous_hour = self.redis.get(f'count:hour:previous:{product_id}') or 1
-        
-        return float(current_hour) / float(previous_hour)
+/**
+ * Purchase event data class.
+ */
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class PurchaseEvent {
+    private String productId;
+    private String category;
+    private String userId;
+    private BigDecimal amount;
+    private Instant timestamp;
+}
 ```
 
 **API Service**:
 
-```python
-from fastapi import FastAPI, Query
-from typing import List, Optional
+```java
+import org.springframework.web.bind.annotation.*;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
+import java.util.*;
+import java.util.stream.Collectors;
 
-app = FastAPI()
-
-class TopSellersService:
-    def __init__(self, redis_client, db):
-        self.redis = redis_client
-        self.db = db
+/**
+ * REST API for retrieving top sellers and trending products.
+ */
+@RestController
+@RequestMapping("/api")
+public class TopSellersController {
     
-    async def get_top_sellers(self, limit: int = 30, 
-                             category: Optional[str] = None) -> List[Dict]:
-        """Get top selling products."""
-        # Determine Redis key
-        if category:
-            key = f'top:category:{category}'
-        else:
-            key = 'top:global:current'
-        
-        # Get from Redis sorted set (highest scores first)
-        results = self.redis.zrevrange(key, 0, limit - 1, withscores=True)
-        
-        # Extract product IDs
-        product_ids = [r[0].decode().split(':')[1] for r in results]
-        
-        # Fetch product details from DB
-        products = await self.db.fetch("""
-            SELECT id, name, price, image_url, category
-            FROM products
-            WHERE id = ANY($1)
-        """, product_ids)
-        
-        # Merge with scores
-        product_map = {str(p['id']): p for p in products}
-        
-        top_sellers = []
-        for product_key, score in results:
-            product_id = product_key.decode().split(':')[1]
-            
-            if product_id in product_map:
-                product = product_map[product_id]
-                top_sellers.append({
-                    'product_id': product_id,
-                    'name': product['name'],
-                    'price': float(product['price']),
-                    'image_url': product['image_url'],
-                    'category': product['category'],
-                    'purchase_count': int(score),
-                    'rank': len(top_sellers) + 1
-                })
-        
-        return top_sellers
+    private final TopSellersService topSellersService;
     
-    async def get_trending_products(self, limit: int = 20) -> List[Dict]:
-        """Get trending products based on velocity."""
-        # Get products with highest velocity
-        results = self.redis.zrevrange('trending:velocity', 0, limit - 1, 
-                                      withscores=True)
+    @Autowired
+    public TopSellersController(TopSellersService topSellersService) {
+        this.topSellersService = topSellersService;
+    }
+    
+    @GetMapping("/top-sellers")
+    public List<TopSellerDto> getTopSellers(
+            @RequestParam(defaultValue = "30") int limit,
+            @RequestParam(required = false) String category) {
+        return topSellersService.getTopSellers(limit, category);
+    }
+    
+    @GetMapping("/trending")
+    public List<TrendingProductDto> getTrending(
+            @RequestParam(defaultValue = "20") int limit) {
+        return topSellersService.getTrendingProducts(limit);
+    }
+}
+
+/**
+ * Service for retrieving top sellers from Redis.
+ */
+@Service
+public class TopSellersService {
+    
+    private final RedisTemplate<String, String> redisTemplate;
+    private final ProductRepository productRepository;
+    
+    @Autowired
+    public TopSellersService(RedisTemplate<String, String> redisTemplate,
+                             ProductRepository productRepository) {
+        this.redisTemplate = redisTemplate;
+        this.productRepository = productRepository;
+    }
+    
+    /**
+     * Get top selling products globally or by category.
+     */
+    public List<TopSellerDto> getTopSellers(int limit, String category) {
+        // Determine Redis key
+        String key = (category != null) 
+            ? "top:category:" + category 
+            : "top:global:current";
         
-        product_ids = [r[0].decode().split(':')[1] for r in results]
+        // Get from Redis sorted set (highest scores first)
+        ZSetOperations<String, String> zSetOps = redisTemplate.opsForZSet();
+        Set<ZSetOperations.TypedTuple<String>> results = 
+            zSetOps.reverseRangeWithScores(key, 0, limit - 1);
         
-        products = await self.db.fetch("""
-            SELECT id, name, price, image_url
-            FROM products
-            WHERE id = ANY($1)
-        """, product_ids)
+        if (results == null || results.isEmpty()) {
+            return Collections.emptyList();
+        }
         
-        product_map = {str(p['id']): p for p in products}
+        // Extract product IDs
+        List<Long> productIds = results.stream()
+            .map(tuple -> {
+                String productKey = tuple.getValue();
+                return Long.parseLong(productKey.split(":")[1]);
+            })
+            .collect(Collectors.toList());
         
-        trending = []
-        for product_key, velocity in results:
-            product_id = product_key.decode().split(':')[1]
+        // Fetch product details from database
+        Map<Long, Product> productMap = productRepository
+            .findAllById(productIds).stream()
+            .collect(Collectors.toMap(Product::getId, p -> p));
+        
+        // Build response with ranking
+        List<TopSellerDto> topSellers = new ArrayList<>();
+        int rank = 1;
+        
+        for (ZSetOperations.TypedTuple<String> tuple : results) {
+            String productKey = tuple.getValue();
+            Long productId = Long.parseLong(productKey.split(":")[1]);
+            Double score = tuple.getScore();
             
-            if product_id in product_map:
-                product = product_map[product_id]
-                trending.append({
-                    'product_id': product_id,
-                    'name': product['name'],
-                    'price': float(product['price']),
-                    'image_url': product['image_url'],
-                    'velocity': float(velocity),
-                    'trend': 'hot' if velocity > 2 else 'rising'
-                })
+            Product product = productMap.get(productId);
+            if (product != null) {
+                topSellers.add(TopSellerDto.builder()
+                    .productId(productId)
+                    .name(product.getName())
+                    .price(product.getPrice())
+                    .imageUrl(product.getImageUrl())
+                    .category(product.getCategory())
+                    .purchaseCount(score.intValue())
+                    .rank(rank++)
+                    .build());
+            }
+        }
         
-        return trending
+        return topSellers;
+    }
+    
+    /**
+     * Get trending products based on velocity (purchase acceleration).
+     */
+    public List<TrendingProductDto> getTrendingProducts(int limit) {
+        ZSetOperations<String, String> zSetOps = redisTemplate.opsForZSet();
+        Set<ZSetOperations.TypedTuple<String>> results = 
+            zSetOps.reverseRangeWithScores("trending:velocity", 0, limit - 1);
+        
+        if (results == null || results.isEmpty()) {
+            return Collections.emptyList();
+        }
+        
+        List<Long> productIds = results.stream()
+            .map(tuple -> Long.parseLong(tuple.getValue().split(":")[1]))
+            .collect(Collectors.toList());
+        
+        Map<Long, Product> productMap = productRepository
+            .findAllById(productIds).stream()
+            .collect(Collectors.toMap(Product::getId, p -> p));
+        
+        List<TrendingProductDto> trending = new ArrayList<>();
+        
+        for (ZSetOperations.TypedTuple<String> tuple : results) {
+            Long productId = Long.parseLong(tuple.getValue().split(":")[1]);
+            Double velocity = tuple.getScore();
+            
+            Product product = productMap.get(productId);
+            if (product != null) {
+                trending.add(TrendingProductDto.builder()
+                    .productId(productId)
+                    .name(product.getName())
+                    .price(product.getPrice())
+                    .imageUrl(product.getImageUrl())
+                    .velocity(velocity)
+                    .trend(velocity > 2.0 ? "hot" : "rising")
+                    .build());
+            }
+        }
+        
+        return trending;
+    }
+}
 
+/**
+ * DTO for top seller product.
+ */
+@Data
+@Builder
+public class TopSellerDto {
+    private Long productId;
+    private String name;
+    private BigDecimal price;
+    private String imageUrl;
+    private String category;
+    private int purchaseCount;
+    private int rank;
+}
 
-@app.get("/api/top-sellers")
-async def get_top_sellers(
-    limit: int = Query(30, ge=1, le=100),
-    category: Optional[str] = None
-):
-    """Get top selling products."""
-    service = TopSellersService(redis, db)
-    return await service.get_top_sellers(limit, category)
-
-
-@app.get("/api/trending")
-async def get_trending(limit: int = Query(20, ge=1, le=50)):
-    """Get trending products."""
-    service = TopSellersService(redis, db)
-    return await service.get_trending_products(limit)
+/**
+ * DTO for trending product.
+ */
+@Data
+@Builder
+public class TrendingProductDto {
+    private Long productId;
+    private String name;
+    private BigDecimal price;
+    private String imageUrl;
+    private double velocity;
+    private String trend; // "hot" or "rising"
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -1465,22 +1843,63 @@ WHERE status = 'available';
 ```
 
 **Number Generation**:
-```python
-import secrets
-import hashlib
+```java
+import java.security.SecureRandom;
+import java.security.MessageDigest;
+import java.math.BigInteger;
 
-def generate_phone_number():
-    """Generate cryptographically random phone number."""
-    # Use secrets for unpredictability
-    random_bytes = secrets.token_bytes(8)
+/**
+ * Cryptographically secure phone number generator.
+ * Produces unpredictable numbers using SecureRandom and SHA-256.
+ */
+public class PhoneNumberGenerator {
     
-    # Hash to get number
-    hash_val = int(hashlib.sha256(random_bytes).hexdigest(), 16)
+    private final SecureRandom secureRandom;
     
-    # Convert to 10-digit phone number
-    phone = str(hash_val % 10000000000).zfill(10)
+    public PhoneNumberGenerator() {
+        this.secureRandom = new SecureRandom();
+    }
     
-    return f"+1{phone}"
+    /**
+     * Generate a cryptographically random phone number.
+     * Uses SecureRandom for unpredictability.
+     */
+    public String generatePhoneNumber() {
+        try {
+            // Generate 8 random bytes
+            byte[] randomBytes = new byte[8];
+            secureRandom.nextBytes(randomBytes);
+            
+            // Hash for additional randomness and to prevent patterns
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(randomBytes);
+            
+            // Convert to a large number
+            BigInteger hashValue = new BigInteger(1, hash);
+            
+            // Mod to get 10-digit number
+            BigInteger tenDigits = BigInteger.valueOf(10_000_000_000L);
+            long phoneDigits = hashValue.mod(tenDigits).longValue();
+            
+            // Format with country code
+            return String.format("+1%010d", phoneDigits);
+            
+        } catch (Exception e) {
+            throw new RuntimeException("Phone number generation failed", e);
+        }
+    }
+    
+    /**
+     * Generate a batch of unique phone numbers.
+     */
+    public List<String> generateBatch(int count) {
+        Set<String> numbers = new HashSet<>();
+        while (numbers.size() < count) {
+            numbers.add(generatePhoneNumber());
+        }
+        return new ArrayList<>(numbers);
+    }
+}
 ```
 
 ---
@@ -1503,27 +1922,98 @@ hotels_by_amenity[
 ```
 
 **2. Ranking Algorithm**:
-```python
-def calculate_hotel_score(hotel, user_prefs):
-    score = 0
+```java
+import java.util.*;
+
+/**
+ * Hotel ranking algorithm considering multiple factors:
+ * price, rating, distance, and amenity match.
+ */
+public class HotelRankingService {
     
-    # Price score (inverse - cheaper is better)
-    price_score = 1 / (hotel.price / 100 + 1)
-    score += price_score * 0.3
+    // Weight factors for scoring components
+    private static final double PRICE_WEIGHT = 0.3;
+    private static final double RATING_WEIGHT = 0.4;
+    private static final double DISTANCE_WEIGHT = 0.2;
+    private static final double AMENITY_WEIGHT = 0.1;
     
-    # Rating score
-    rating_score = hotel.rating / 5.0
-    score += rating_score * 0.4
+    /**
+     * Calculate composite score for a hotel based on user preferences.
+     */
+    public double calculateHotelScore(Hotel hotel, UserPreferences userPrefs) {
+        double score = 0.0;
+        
+        // Price score (inverse - cheaper is better, normalized)
+        double priceScore = 1.0 / (hotel.getPrice() / 100.0 + 1.0);
+        score += priceScore * PRICE_WEIGHT;
+        
+        // Rating score (normalized to 0-1)
+        double ratingScore = hotel.getRating() / 5.0;
+        score += ratingScore * RATING_WEIGHT;
+        
+        // Distance score (closer is better)
+        double distanceScore = 1.0 / (hotel.getDistanceKm() + 1.0);
+        score += distanceScore * DISTANCE_WEIGHT;
+        
+        // Amenity match score
+        double amenityScore = calculateAmenityMatch(
+            hotel.getAmenities(), userPrefs.getDesiredAmenities());
+        score += amenityScore * AMENITY_WEIGHT;
+        
+        return score;
+    }
     
-    # Distance score (closer is better)
-    distance_score = 1 / (hotel.distance_km + 1)
-    score += distance_score * 0.2
+    /**
+     * Calculate amenity match percentage.
+     */
+    private double calculateAmenityMatch(Set<String> hotelAmenities, 
+                                          Set<String> desiredAmenities) {
+        if (desiredAmenities == null || desiredAmenities.isEmpty()) {
+            return 1.0;  // No preferences means full match
+        }
+        
+        Set<String> intersection = new HashSet<>(hotelAmenities);
+        intersection.retainAll(desiredAmenities);
+        
+        return (double) intersection.size() / desiredAmenities.size();
+    }
     
-    # Amenity match score
-    amenity_score = len(hotel.amenities & user_prefs.amenities) / len(user_prefs.amenities)
-    score += amenity_score * 0.1
-    
-    return score
+    /**
+     * Rank hotels by composite score.
+     */
+    public List<Hotel> rankHotels(List<Hotel> hotels, UserPreferences userPrefs) {
+        return hotels.stream()
+            .peek(hotel -> hotel.setScore(calculateHotelScore(hotel, userPrefs)))
+            .sorted(Comparator.comparingDouble(Hotel::getScore).reversed())
+            .collect(Collectors.toList());
+    }
+}
+
+/**
+ * Hotel entity with scoring support.
+ */
+@Data
+public class Hotel {
+    private Long id;
+    private String name;
+    private double price;
+    private double rating;
+    private double distanceKm;
+    private Set<String> amenities;
+    private double score;  // Calculated score for ranking
+}
+
+/**
+ * User search preferences.
+ */
+@Data
+public class UserPreferences {
+    private Double maxPrice;
+    private Integer minRating;
+    private Double maxDistanceKm;
+    private Set<String> desiredAmenities;
+    private String priceRange;  // "budget", "mid", "luxury"
+}
 ```
 
 **3. Elasticsearch Query**:
@@ -1687,16 +2177,83 @@ Design a distributed configuration store like etcd or ZooKeeper for storing appl
 - Distributed locks
 - Feature flags
 
-```python
-# Example usage
-config_store = DistributedConfig()
+```java
+import java.util.concurrent.*;
+import java.util.function.Consumer;
 
-# Set configuration
-await config_store.set("/app/db_host", "db.example.com")
+/**
+ * Distributed configuration store client interface.
+ * Provides key-value storage with watch capability for configuration management.
+ */
+public interface DistributedConfigClient {
+    
+    /**
+     * Set a configuration value.
+     */
+    CompletableFuture<Void> set(String key, String value);
+    
+    /**
+     * Get a configuration value.
+     */
+    CompletableFuture<String> get(String key);
+    
+    /**
+     * Delete a configuration key.
+     */
+    CompletableFuture<Void> delete(String key);
+    
+    /**
+     * Watch for changes on a key prefix.
+     * Callback is invoked whenever a key matching the prefix is modified.
+     */
+    void watch(String keyPrefix, Consumer<ConfigChangeEvent> callback);
+}
 
-# Watch for changes
-async for event in config_store.watch("/app/"):
-    print(f"Config changed: {event.key} = {event.value}")
+/**
+ * Configuration change event.
+ */
+@Data
+@AllArgsConstructor
+public class ConfigChangeEvent {
+    private String key;
+    private String value;
+    private ChangeType type;  // PUT, DELETE
+    
+    public enum ChangeType {
+        PUT, DELETE
+    }
+}
+
+// Example usage
+public class ConfigurationManager {
+    
+    private final DistributedConfigClient configStore;
+    
+    public ConfigurationManager(DistributedConfigClient configStore) {
+        this.configStore = configStore;
+    }
+    
+    public void setupConfiguration() {
+        // Set configuration value
+        configStore.set("/app/db_host", "db.example.com")
+            .thenRun(() -> System.out.println("Configuration saved"));
+        
+        // Watch for changes on /app/ prefix
+        configStore.watch("/app/", event -> {
+            System.out.printf("Config changed: %s = %s (type: %s)%n", 
+                event.getKey(), event.getValue(), event.getType());
+            
+            // React to configuration changes
+            if (event.getKey().equals("/app/db_host")) {
+                reconnectDatabase(event.getValue());
+            }
+        });
+    }
+    
+    private void reconnectDatabase(String newHost) {
+        // Handle database reconnection
+    }
+}
 ```
 
 ---
@@ -1715,30 +2272,95 @@ Design a location-based service to find nearby restaurants/businesses with ratin
 ```
 
 **Ranking**:
-```python
-def rank_places(places, user_location, user_prefs):
-    for place in places:
-        score = 0
-        
-        # Distance penalty
-        distance = haversine(user_location, place.location)
-        distance_score = 1 / (distance + 0.1)
-        score += distance_score * 0.4
-        
-        # Rating
-        score += (place.rating / 5.0) * 0.3
-        
-        # Review count (popularity)
-        review_score = min(place.review_count / 1000, 1.0)
-        score += review_score * 0.2
-        
-        # Price match
-        if place.price_range == user_prefs.price_range:
-            score += 0.1
-        
-        place.score = score
+```java
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Service for ranking nearby places (restaurants, businesses)
+ * based on distance, rating, popularity, and user preferences.
+ */
+public class PlaceRankingService {
     
-    return sorted(places, key=lambda p: p.score, reverse=True)
+    /**
+     * Rank places by weighted score based on multiple factors.
+     */
+    public List<Place> rankPlaces(List<Place> places, 
+                                   GeoLocation userLocation,
+                                   UserPreferences userPrefs) {
+        
+        return places.stream()
+            .peek(place -> {
+                double score = 0.0;
+                
+                // Distance penalty (40% weight) - closer is better
+                double distance = calculateHaversineDistance(
+                    userLocation, place.getLocation());
+                double distanceScore = 1.0 / (distance + 0.1);
+                score += distanceScore * 0.4;
+                
+                // Rating (30% weight)
+                double ratingScore = place.getRating() / 5.0;
+                score += ratingScore * 0.3;
+                
+                // Review count / popularity (20% weight)
+                double reviewScore = Math.min(place.getReviewCount() / 1000.0, 1.0);
+                score += reviewScore * 0.2;
+                
+                // Price range match (10% weight)
+                if (userPrefs != null && 
+                    place.getPriceRange().equals(userPrefs.getPreferredPriceRange())) {
+                    score += 0.1;
+                }
+                
+                place.setScore(score);
+            })
+            .sorted(Comparator.comparingDouble(Place::getScore).reversed())
+            .collect(Collectors.toList());
+    }
+    
+    /**
+     * Calculate distance between two points using Haversine formula.
+     */
+    private double calculateHaversineDistance(GeoLocation loc1, GeoLocation loc2) {
+        final double R = 6371.0; // Earth's radius in km
+        
+        double lat1Rad = Math.toRadians(loc1.getLatitude());
+        double lat2Rad = Math.toRadians(loc2.getLatitude());
+        double deltaLat = Math.toRadians(loc2.getLatitude() - loc1.getLatitude());
+        double deltaLon = Math.toRadians(loc2.getLongitude() - loc1.getLongitude());
+        
+        double a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+                   Math.cos(lat1Rad) * Math.cos(lat2Rad) *
+                   Math.sin(deltaLon / 2) * Math.sin(deltaLon / 2);
+        
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        
+        return R * c;
+    }
+}
+
+/**
+ * Place entity (restaurant, business, etc.).
+ */
+@Data
+public class Place {
+    private Long id;
+    private String name;
+    private GeoLocation location;
+    private double rating;
+    private int reviewCount;
+    private String priceRange;  // "$", "$$", "$$$", "$$$$"
+    private List<String> categories;
+    private double score;  // Computed ranking score
+}
+
+@Data
+@AllArgsConstructor
+public class GeoLocation {
+    private double latitude;
+    private double longitude;
+}
 ```
 
 ---
@@ -1765,39 +2387,160 @@ ZREVRANGE leaderboard:global (rank-10) (rank+10) WITHSCORES
 ```
 
 **Redis Sorted Set Operations**:
-```python
-class Leaderboard:
-    def __init__(self, redis_client):
-        self.redis = redis_client
-        self.key = "leaderboard:global"
+```java
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.stereotype.Service;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Real-time gaming leaderboard using Redis Sorted Sets.
+ * Supports efficient score updates and rank queries for millions of players.
+ */
+@Service
+public class Leaderboard {
     
-    def update_score(self, player_id, score):
-        """Update player score."""
-        self.redis.zadd(self.key, {player_id: score})
+    private final RedisTemplate<String, String> redisTemplate;
+    private final ZSetOperations<String, String> zSetOps;
+    private static final String LEADERBOARD_KEY = "leaderboard:global";
     
-    def get_rank(self, player_id):
-        """Get player's rank (1-indexed)."""
-        rank = self.redis.zrevrank(self.key, player_id)
-        return rank + 1 if rank is not None else None
+    @Autowired
+    public Leaderboard(RedisTemplate<String, String> redisTemplate) {
+        this.redisTemplate = redisTemplate;
+        this.zSetOps = redisTemplate.opsForZSet();
+    }
     
-    def get_top_players(self, limit=100):
-        """Get top N players."""
-        return self.redis.zrevrange(
-            self.key, 0, limit - 1, withscores=True
-        )
+    /**
+     * Update a player's score.
+     * O(log N) complexity where N is number of players.
+     */
+    public void updateScore(String playerId, double score) {
+        zSetOps.add(LEADERBOARD_KEY, playerId, score);
+    }
     
-    def get_player_context(self, player_id, context=10):
-        """Get nearby players."""
-        rank = self.redis.zrevrank(self.key, player_id)
-        if rank is None:
-            return []
+    /**
+     * Increment a player's score by delta.
+     * Useful for adding points from game events.
+     */
+    public Double incrementScore(String playerId, double delta) {
+        return zSetOps.incrementScore(LEADERBOARD_KEY, playerId, delta);
+    }
+    
+    /**
+     * Get a player's rank (1-indexed, where 1 is highest score).
+     * O(log N) complexity.
+     */
+    public Long getRank(String playerId) {
+        Long rank = zSetOps.reverseRank(LEADERBOARD_KEY, playerId);
+        return (rank != null) ? rank + 1 : null;  // Convert to 1-indexed
+    }
+    
+    /**
+     * Get a player's current score.
+     */
+    public Double getScore(String playerId) {
+        return zSetOps.score(LEADERBOARD_KEY, playerId);
+    }
+    
+    /**
+     * Get top N players with their scores.
+     * O(log N + M) where M is the limit.
+     */
+    public List<LeaderboardEntry> getTopPlayers(int limit) {
+        Set<ZSetOperations.TypedTuple<String>> results = 
+            zSetOps.reverseRangeWithScores(LEADERBOARD_KEY, 0, limit - 1);
         
-        start = max(0, rank - context)
-        end = rank + context
+        if (results == null) {
+            return Collections.emptyList();
+        }
         
-        return self.redis.zrevrange(
-            self.key, start, end, withscores=True
-        )
+        List<LeaderboardEntry> entries = new ArrayList<>();
+        int rank = 1;
+        
+        for (ZSetOperations.TypedTuple<String> tuple : results) {
+            entries.add(new LeaderboardEntry(
+                tuple.getValue(),
+                tuple.getScore(),
+                rank++
+            ));
+        }
+        
+        return entries;
+    }
+    
+    /**
+     * Get players near a specific player (contextual view).
+     * Shows the player's neighbors in the ranking.
+     */
+    public List<LeaderboardEntry> getPlayerContext(String playerId, int contextSize) {
+        Long rank = zSetOps.reverseRank(LEADERBOARD_KEY, playerId);
+        
+        if (rank == null) {
+            return Collections.emptyList();
+        }
+        
+        long start = Math.max(0, rank - contextSize);
+        long end = rank + contextSize;
+        
+        Set<ZSetOperations.TypedTuple<String>> results = 
+            zSetOps.reverseRangeWithScores(LEADERBOARD_KEY, start, end);
+        
+        if (results == null) {
+            return Collections.emptyList();
+        }
+        
+        List<LeaderboardEntry> entries = new ArrayList<>();
+        int currentRank = (int) start + 1;
+        
+        for (ZSetOperations.TypedTuple<String> tuple : results) {
+            entries.add(new LeaderboardEntry(
+                tuple.getValue(),
+                tuple.getScore(),
+                currentRank++
+            ));
+        }
+        
+        return entries;
+    }
+    
+    /**
+     * Get total number of players on the leaderboard.
+     */
+    public Long getTotalPlayers() {
+        return zSetOps.size(LEADERBOARD_KEY);
+    }
+    
+    /**
+     * Get players within a score range.
+     */
+    public List<LeaderboardEntry> getPlayersByScoreRange(double minScore, double maxScore) {
+        Set<ZSetOperations.TypedTuple<String>> results = 
+            zSetOps.reverseRangeByScoreWithScores(LEADERBOARD_KEY, minScore, maxScore);
+        
+        if (results == null) {
+            return Collections.emptyList();
+        }
+        
+        return results.stream()
+            .map(tuple -> new LeaderboardEntry(
+                tuple.getValue(), 
+                tuple.getScore(), 
+                0))  // Rank not applicable for range query
+            .collect(Collectors.toList());
+    }
+}
+
+/**
+ * Leaderboard entry containing player info, score, and rank.
+ */
+@Data
+@AllArgsConstructor
+public class LeaderboardEntry {
+    private String playerId;
+    private Double score;
+    private int rank;
+}
 ```
 
 **Sharding for Millions of Players**:
@@ -2086,54 +2829,190 @@ EXECUTE FUNCTION check_reorder_point();
 ```
 
 **Inventory Operations**:
-```python
-class InventoryService:
-    def adjust_stock(self, product_id, location_id, quantity, 
-                    movement_type, reference_id=None):
-        """Adjust stock with audit trail."""
-        with db.transaction():
-            # Update inventory
-            db.execute("""
-                INSERT INTO inventory (product_id, location_id, quantity)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (product_id, location_id)
-                DO UPDATE SET 
-                    quantity = inventory.quantity + EXCLUDED.quantity,
-                    last_updated = NOW()
-            """, product_id, location_id, quantity)
-            
-            # Record movement
-            db.execute("""
-                INSERT INTO stock_movements
-                (product_id, location_id, movement_type, quantity, reference_id)
-                VALUES ($1, $2, $3, $4, $5)
-            """, product_id, location_id, movement_type, quantity, reference_id)
+```java
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.jdbc.core.JdbcTemplate;
+import java.util.*;
+
+/**
+ * Retail store inventory management service.
+ * Handles stock adjustments, transfers, and reorder alerts.
+ */
+@Service
+public class InventoryService {
     
-    def transfer_stock(self, product_id, from_location, to_location, quantity):
-        """Transfer stock between locations."""
-        with db.transaction():
-            # Deduct from source
-            self.adjust_stock(product_id, from_location, -quantity, 
-                            'transfer', f'TXF-{uuid4()}')
-            
-            # Add to destination
-            self.adjust_stock(product_id, to_location, quantity,
-                            'transfer', f'TXF-{uuid4()}')
+    private final JdbcTemplate db;
     
-    def get_low_stock_items(self, location_id=None):
-        """Get items below reorder point."""
-        query = """
-            SELECT p.*, i.quantity, i.location_id
+    @Autowired
+    public InventoryService(JdbcTemplate db) {
+        this.db = db;
+    }
+    
+    /**
+     * Adjust stock quantity with full audit trail.
+     * Supports in, out, transfer, and adjustment movements.
+     */
+    @Transactional
+    public void adjustStock(Long productId, Long locationId, int quantity,
+                           MovementType movementType, String referenceId) {
+        
+        // Update inventory using UPSERT
+        String upsertQuery = """
+            INSERT INTO inventory (product_id, location_id, quantity)
+            VALUES (?, ?, ?)
+            ON CONFLICT (product_id, location_id)
+            DO UPDATE SET 
+                quantity = inventory.quantity + EXCLUDED.quantity,
+                last_updated = NOW()
+            """;
+        
+        db.update(upsertQuery, productId, locationId, quantity);
+        
+        // Record movement for audit trail
+        String movementQuery = """
+            INSERT INTO stock_movements
+            (product_id, location_id, movement_type, quantity, reference_id)
+            VALUES (?, ?, ?, ?, ?)
+            """;
+        
+        db.update(movementQuery, productId, locationId, 
+            movementType.name().toLowerCase(), quantity, referenceId);
+    }
+    
+    /**
+     * Transfer stock between locations atomically.
+     */
+    @Transactional
+    public void transferStock(Long productId, Long fromLocation, 
+                              Long toLocation, int quantity) {
+        // Generate transfer reference ID
+        String transferId = "TXF-" + UUID.randomUUID().toString().substring(0, 8);
+        
+        // Verify source has sufficient stock
+        Integer currentStock = db.queryForObject(
+            "SELECT quantity FROM inventory WHERE product_id = ? AND location_id = ?",
+            Integer.class, productId, fromLocation);
+        
+        if (currentStock == null || currentStock < quantity) {
+            throw new InsufficientStockException(
+                "Insufficient stock at source location. Available: " + 
+                (currentStock != null ? currentStock : 0));
+        }
+        
+        // Deduct from source location
+        adjustStock(productId, fromLocation, -quantity, 
+            MovementType.TRANSFER, transferId);
+        
+        // Add to destination location
+        adjustStock(productId, toLocation, quantity, 
+            MovementType.TRANSFER, transferId);
+    }
+    
+    /**
+     * Get items below reorder point, optionally filtered by location.
+     */
+    public List<LowStockItem> getLowStockItems(Long locationId) {
+        String query = """
+            SELECT p.id, p.sku, p.name, p.reorder_point, p.reorder_quantity,
+                   i.quantity, i.location_id, l.name as location_name
             FROM products p
             JOIN inventory i ON p.id = i.product_id
+            JOIN locations l ON i.location_id = l.id
             WHERE i.quantity <= p.reorder_point
-        """
+            """;
         
-        if location_id:
-            query += " AND i.location_id = $1"
-            return db.fetch(query, location_id)
+        if (locationId != null) {
+            query += " AND i.location_id = ?";
+            return db.query(query, new LowStockItemRowMapper(), locationId);
+        }
         
-        return db.fetch(query)
+        return db.query(query, new LowStockItemRowMapper());
+    }
+    
+    /**
+     * Get stock level for a product at a specific location.
+     */
+    public Optional<Integer> getStockLevel(Long productId, Long locationId) {
+        String query = """
+            SELECT quantity FROM inventory 
+            WHERE product_id = ? AND location_id = ?
+            """;
+        
+        try {
+            Integer quantity = db.queryForObject(query, Integer.class, 
+                productId, locationId);
+            return Optional.ofNullable(quantity);
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+    
+    /**
+     * Get stock movement history for a product.
+     */
+    public List<StockMovement> getMovementHistory(Long productId, 
+                                                   Long locationId, 
+                                                   int limit) {
+        String query = """
+            SELECT * FROM stock_movements
+            WHERE product_id = ? AND location_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """;
+        
+        return db.query(query, new StockMovementRowMapper(), 
+            productId, locationId, limit);
+    }
+}
+
+/**
+ * Types of inventory movements.
+ */
+public enum MovementType {
+    IN,          // Stock received
+    OUT,         // Stock sold/shipped
+    TRANSFER,    // Inter-location transfer
+    ADJUSTMENT   // Manual correction
+}
+
+/**
+ * Low stock item with reorder information.
+ */
+@Data
+public class LowStockItem {
+    private Long productId;
+    private String sku;
+    private String name;
+    private int currentQuantity;
+    private int reorderPoint;
+    private int reorderQuantity;
+    private Long locationId;
+    private String locationName;
+}
+
+/**
+ * Stock movement audit record.
+ */
+@Data
+public class StockMovement {
+    private Long id;
+    private Long productId;
+    private Long locationId;
+    private MovementType movementType;
+    private int quantity;
+    private String referenceId;
+    private Instant createdAt;
+}
+
+/**
+ * Exception for insufficient stock scenarios.
+ */
+public class InsufficientStockException extends RuntimeException {
+    public InsufficientStockException(String message) {
+        super(message);
+    }
+}
 ```
 
 ---

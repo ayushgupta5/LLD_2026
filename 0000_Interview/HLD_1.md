@@ -835,24 +835,69 @@ LIMIT 50;
 
 **Geohash Caching**:
 
-```python
-# Cache hotels by geohash prefix
-def cache_hotels_by_geohash(lat, lon, radius_km):
-    geohash = encode(lat, lon, precision=6)  # ~1.2km cell
+```java
+/**
+ * Cache hotels by geohash prefix for efficient proximity lookups.
+ * Uses geohash encoding to create spatial index keys for Redis caching.
+ */
+public class GeohashHotelCache {
     
-    # Get adjacent cells for coverage
-    neighbors = geohash_neighbors(geohash)
+    private final RedisTemplate<String, List<Hotel>> redisTemplate;
+    private final HotelRepository hotelRepository;
+    private static final int GEOHASH_PRECISION = 6; // ~1.2km cell
+    private static final long CACHE_TTL_SECONDS = 3600; // 1 hour
     
-    cache_key = f"hotels:geo:{geohash}"
-    cached = redis.get(cache_key)
+    public GeohashHotelCache(RedisTemplate<String, List<Hotel>> redisTemplate,
+                            HotelRepository hotelRepository) {
+        this.redisTemplate = redisTemplate;
+        this.hotelRepository = hotelRepository;
+    }
     
-    if cached:
-        return filter_by_distance(cached, lat, lon, radius_km)
+    public List<Hotel> getHotelsByGeohash(double lat, double lon, double radiusKm) {
+        // Encode coordinates to geohash with specified precision
+        String geohash = GeoHash.encodeHash(lat, lon, GEOHASH_PRECISION);
+        
+        // Get adjacent cells for complete coverage at boundaries
+        List<String> neighbors = GeoHash.getNeighbors(geohash);
+        neighbors.add(geohash);
+        
+        String cacheKey = String.format("hotels:geo:%s", geohash);
+        
+        // Check cache first
+        List<Hotel> cached = redisTemplate.opsForValue().get(cacheKey);
+        if (cached != null) {
+            return filterByDistance(cached, lat, lon, radiusKm);
+        }
+        
+        // Cache miss - query database and populate cache
+        List<Hotel> hotels = hotelRepository.findByGeohash(geohash);
+        redisTemplate.opsForValue().set(cacheKey, hotels, 
+            Duration.ofSeconds(CACHE_TTL_SECONDS));
+        
+        return filterByDistance(hotels, lat, lon, radiusKm);
+    }
     
-    # Cache miss - query DB and cache
-    hotels = db.query_by_geohash(geohash)
-    redis.setex(cache_key, 3600, hotels)  # 1 hour TTL
-    return hotels
+    private List<Hotel> filterByDistance(List<Hotel> hotels, 
+                                          double lat, double lon, 
+                                          double radiusKm) {
+        return hotels.stream()
+            .filter(hotel -> calculateHaversineDistance(
+                lat, lon, hotel.getLatitude(), hotel.getLongitude()) <= radiusKm)
+            .collect(Collectors.toList());
+    }
+    
+    private double calculateHaversineDistance(double lat1, double lon1, 
+                                               double lat2, double lon2) {
+        final double R = 6371.0; // Earth's radius in kilometers
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                   Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                   Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+    }
+}
 ```
 
 ### High-Level Diagram
@@ -1055,52 +1100,163 @@ Ensures same URL always goes to same worker (caching benefit)
 
 **Worker Assignment**:
 
-```python
-# Consistent hashing for worker assignment
-class ConsistentHash:
-    def __init__(self, nodes, virtual_nodes=150):
-        self.ring = {}
-        self.nodes = nodes
-        for node in nodes:
-            for i in range(virtual_nodes):
-                key = hashlib.md5(f"{node}:{i}").digest()
-                self.ring[key] = node
-        self.sorted_keys = sorted(self.ring.keys())
-    
-    def get_node(self, url):
-        url_hash = hashlib.md5(url).digest()
-        for key in self.sorted_keys:
-            if url_hash <= key:
-                return self.ring[key]
-        return self.ring[self.sorted_keys[0]]
+```java
+import java.security.MessageDigest;
+import java.util.*;
+import java.util.concurrent.*;
 
-# Scheduler main loop
-def schedule_urls():
-    while True:
-        # Fetch due URLs
-        urls = db.query("""
+/**
+ * Consistent Hashing implementation for distributed worker assignment.
+ * Uses virtual nodes to ensure even distribution of workload.
+ */
+public class ConsistentHashRing {
+    
+    private final TreeMap<String, String> ring = new TreeMap<>();
+    private final List<String> nodes;
+    private final int virtualNodes;
+    
+    public ConsistentHashRing(List<String> nodes, int virtualNodes) {
+        this.nodes = new ArrayList<>(nodes);
+        this.virtualNodes = virtualNodes;
+        buildRing();
+    }
+    
+    private void buildRing() {
+        for (String node : nodes) {
+            for (int i = 0; i < virtualNodes; i++) {
+                String key = computeMD5Hash(node + ":" + i);
+                ring.put(key, node);
+            }
+        }
+    }
+    
+    public String getNodeForKey(String url) {
+        if (ring.isEmpty()) {
+            return null;
+        }
+        
+        String hash = computeMD5Hash(url);
+        Map.Entry<String, String> entry = ring.ceilingEntry(hash);
+        
+        // Wrap around to first node if necessary
+        if (entry == null) {
+            entry = ring.firstEntry();
+        }
+        return entry.getValue();
+    }
+    
+    private String computeMD5Hash(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes());
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("MD5 hash computation failed", e);
+        }
+    }
+}
+
+/**
+ * Distributed URL Scheduler that polls database for due URLs
+ * and distributes work across worker nodes using consistent hashing.
+ */
+public class DistributedScheduler implements Runnable {
+    
+    private final DataSource dataSource;
+    private final KafkaProducer<String, URLRecord> kafkaProducer;
+    private final ConsistentHashRing hashRing;
+    private final int batchSize;
+    private final long pollIntervalMs;
+    private volatile boolean running = true;
+    
+    public DistributedScheduler(DataSource dataSource,
+                                 KafkaProducer<String, URLRecord> kafkaProducer,
+                                 List<String> workerNodes,
+                                 int batchSize,
+                                 long pollIntervalMs) {
+        this.dataSource = dataSource;
+        this.kafkaProducer = kafkaProducer;
+        this.hashRing = new ConsistentHashRing(workerNodes, 150);
+        this.batchSize = batchSize;
+        this.pollIntervalMs = pollIntervalMs;
+    }
+    
+    @Override
+    public void run() {
+        while (running) {
+            try {
+                scheduleUrls();
+                Thread.sleep(pollIntervalMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                // Log error and continue
+                System.err.println("Scheduling error: " + e.getMessage());
+            }
+        }
+    }
+    
+    private void scheduleUrls() throws SQLException {
+        String query = """
             SELECT id, url, frequency 
             FROM url_schedule 
             WHERE next_run <= NOW() 
               AND status = 'pending'
             ORDER BY next_run, priority 
-            LIMIT 10000
-        """)
+            LIMIT ?
+            """;
         
-        # Partition and publish
-        for url_record in urls:
-            worker = consistent_hash.get_node(url_record.url)
-            topic = f"{url_record.frequency}-tasks"
-            kafka.publish(topic, url_record, partition_key=worker)
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(query)) {
             
-            # Update status
-            db.update("""
-                UPDATE url_schedule 
-                SET status = 'processing' 
-                WHERE id = %s
-            """, url_record.id)
-        
-        time.sleep(10)  # Poll interval
+            stmt.setInt(1, batchSize);
+            ResultSet rs = stmt.executeQuery();
+            
+            while (rs.next()) {
+                URLRecord record = new URLRecord(
+                    rs.getLong("id"),
+                    rs.getString("url"),
+                    rs.getString("frequency")
+                );
+                
+                // Determine target worker using consistent hashing
+                String worker = hashRing.getNodeForKey(record.getUrl());
+                String topic = record.getFrequency() + "-tasks";
+                
+                // Publish to Kafka with worker as partition key
+                ProducerRecord<String, URLRecord> kafkaRecord = 
+                    new ProducerRecord<>(topic, worker, record);
+                kafkaProducer.send(kafkaRecord);
+                
+                // Update status to processing
+                updateStatusToProcessing(conn, record.getId());
+            }
+        }
+    }
+    
+    private void updateStatusToProcessing(Connection conn, long id) 
+            throws SQLException {
+        String updateQuery = "UPDATE url_schedule SET status = 'processing' WHERE id = ?";
+        try (PreparedStatement stmt = conn.prepareStatement(updateQuery)) {
+            stmt.setLong(1, id);
+            stmt.executeUpdate();
+        }
+    }
+    
+    public void shutdown() {
+        running = false;
+    }
+}
+
+/**
+ * Data class representing a URL record for scheduling.
+ */
+public record URLRecord(long id, String url, String frequency) {}
 ```
 
 **Failure Handling**:
@@ -1320,48 +1476,131 @@ props.put("enable.auto.commit", "false");
 
 **Idempotency Implementation**:
 
-```python
-async def process_payment(request):
-    idempotency_key = request.headers.get('Idempotency-Key')
+```java
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * Payment processor with idempotency support.
+ * Ensures exactly-once processing using distributed locks and caching.
+ */
+@Service
+public class IdempotentPaymentService {
     
-    # Check cache
-    cached = await redis.get(f"idempotency:{idempotency_key}")
-    if cached:
-        return json.loads(cached)  # Return cached result
+    private final RedisTemplate<String, String> redisTemplate;
+    private final TransactionRepository transactionRepository;
+    private final PaymentProvider paymentProvider;
+    private final KafkaTemplate<String, Transaction> kafkaTemplate;
     
-    # Acquire distributed lock
-    lock = await redis.set(
-        f"lock:idempotency:{idempotency_key}", 
-        "1", 
-        nx=True, 
-        ex=300  # 5 min expiry
-    )
+    private static final Duration LOCK_TIMEOUT = Duration.ofMinutes(5);
+    private static final Duration IDEMPOTENCY_CACHE_TTL = Duration.ofHours(24);
     
-    if not lock:
-        # Another request with same key is processing
-        await asyncio.sleep(0.1)
-        return await redis.get(f"idempotency:{idempotency_key}")
+    @Autowired
+    public IdempotentPaymentService(RedisTemplate<String, String> redisTemplate,
+                                     TransactionRepository transactionRepository,
+                                     PaymentProvider paymentProvider,
+                                     KafkaTemplate<String, Transaction> kafkaTemplate) {
+        this.redisTemplate = redisTemplate;
+        this.transactionRepository = transactionRepository;
+        this.paymentProvider = paymentProvider;
+        this.kafkaTemplate = kafkaTemplate;
+    }
     
-    try:
-        # Process payment
-        async with db.transaction():
-            txn = await db.insert_transaction(request, status='PENDING')
-            await kafka.send_transactional(txn)
+    @Transactional
+    public CompletableFuture<PaymentResult> processPayment(PaymentRequest request) {
+        String idempotencyKey = request.getIdempotencyKey();
+        String cacheKey = "idempotency:" + idempotencyKey;
+        String lockKey = "lock:idempotency:" + idempotencyKey;
         
-        # Call provider
-        result = await payment_provider.charge(request)
+        // Step 1: Check if already processed (cached result)
+        String cachedResult = redisTemplate.opsForValue().get(cacheKey);
+        if (cachedResult != null) {
+            return CompletableFuture.completedFuture(
+                deserializeResult(cachedResult));
+        }
         
-        # Update and cache
-        await db.update_transaction(txn.id, result.status)
-        await redis.setex(
-            f"idempotency:{idempotency_key}", 
-            86400,  # 24h TTL
-            json.dumps(result)
-        )
+        // Step 2: Acquire distributed lock
+        Boolean lockAcquired = redisTemplate.opsForValue()
+            .setIfAbsent(lockKey, "1", LOCK_TIMEOUT);
         
-        return result
-    finally:
-        await redis.delete(f"lock:idempotency:{idempotency_key}")
+        if (Boolean.FALSE.equals(lockAcquired)) {
+            // Another request with same key is processing - wait and retry
+            return waitAndRetry(cacheKey);
+        }
+        
+        try {
+            return processPaymentInternal(request, cacheKey, lockKey);
+        } finally {
+            // Always release lock
+            redisTemplate.delete(lockKey);
+        }
+    }
+    
+    private CompletableFuture<PaymentResult> processPaymentInternal(
+            PaymentRequest request, String cacheKey, String lockKey) {
+        
+        // Step 3: Create transaction record with PENDING status
+        Transaction transaction = Transaction.builder()
+            .idempotencyKey(request.getIdempotencyKey())
+            .amount(request.getAmount())
+            .currency(request.getCurrency())
+            .status(TransactionStatus.PENDING)
+            .createdAt(Instant.now())
+            .build();
+        
+        transaction = transactionRepository.save(transaction);
+        
+        // Step 4: Send to Kafka (transactional)
+        kafkaTemplate.executeInTransaction(operations -> {
+            operations.send("payments-topic", transaction);
+            return true;
+        });
+        
+        // Step 5: Call payment provider
+        PaymentProviderResult providerResult = paymentProvider.charge(request);
+        
+        // Step 6: Update transaction status
+        transaction.setStatus(providerResult.isSuccess() 
+            ? TransactionStatus.SUCCESS 
+            : TransactionStatus.FAILED);
+        transaction.setProviderTransactionId(providerResult.getTransactionId());
+        transactionRepository.save(transaction);
+        
+        // Step 7: Cache result for idempotency
+        PaymentResult result = PaymentResult.from(transaction, providerResult);
+        redisTemplate.opsForValue().set(
+            cacheKey, 
+            serializeResult(result), 
+            IDEMPOTENCY_CACHE_TTL);
+        
+        return CompletableFuture.completedFuture(result);
+    }
+    
+    private CompletableFuture<PaymentResult> waitAndRetry(String cacheKey) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                Thread.sleep(100);
+                String cached = redisTemplate.opsForValue().get(cacheKey);
+                if (cached != null) {
+                    return deserializeResult(cached);
+                }
+                throw new PaymentProcessingException(
+                    "Payment processing in progress by another request");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new PaymentProcessingException("Interrupted while waiting");
+            }
+        });
+    }
+    
+    private String serializeResult(PaymentResult result) {
+        return new ObjectMapper().writeValueAsString(result);
+    }
+    
+    private PaymentResult deserializeResult(String json) {
+        return new ObjectMapper().readValue(json, PaymentResult.class);
+    }
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -1554,48 +1793,191 @@ Deduplication:
 
 **Sync Protocol**:
 
-```python
-# Client sync daemon
-class SyncClient:
-    def sync_file(self, file_path):
-        # 1. Chunk file
-        chunks = self.chunk_file(file_path, chunk_size=4*1024*1024)
+```java
+import java.io.*;
+import java.nio.file.*;
+import java.security.MessageDigest;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Client-side file synchronization daemon implementing chunked uploads
+ * with deduplication support for efficient cloud storage sync.
+ */
+public class FileSyncClient {
+    
+    private static final int CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+    private final Path syncFolder;
+    private final CloudStorageApi api;
+    private final String userId;
+    
+    public FileSyncClient(Path syncFolder, CloudStorageApi api, String userId) {
+        this.syncFolder = syncFolder;
+        this.api = api;
+        this.userId = userId;
+    }
+    
+    /**
+     * Synchronize a file to the cloud storage.
+     * Uses chunking and deduplication to minimize data transfer.
+     */
+    public void syncFile(Path filePath) throws IOException {
+        // Step 1: Chunk the file
+        List<byte[]> chunks = chunkFile(filePath);
         
-        # 2. Calculate hashes
-        chunk_hashes = [sha256(chunk).hexdigest() for chunk in chunks]
+        // Step 2: Calculate SHA-256 hash for each chunk
+        List<String> chunkHashes = chunks.stream()
+            .map(this::calculateSha256)
+            .collect(Collectors.toList());
         
-        # 3. Check existing chunks
-        response = api.check_chunks(chunk_hashes)
-        missing_hashes = response['missing']
+        // Step 3: Check which chunks already exist on server
+        CheckChunksResponse response = api.checkChunks(chunkHashes);
+        Set<String> missingHashes = new HashSet<>(response.getMissingHashes());
         
-        # 4. Upload missing chunks
-        for i, chunk_hash in enumerate(chunk_hashes):
-            if chunk_hash in missing_hashes:
-                api.upload_chunk(chunk_hash, chunks[i])
+        // Step 4: Upload only missing chunks (deduplication)
+        for (int i = 0; i < chunkHashes.size(); i++) {
+            String hash = chunkHashes.get(i);
+            if (missingHashes.contains(hash)) {
+                api.uploadChunk(hash, chunks.get(i));
+            }
+        }
         
-        # 5. Create file metadata
-        api.create_file(
-            name=file_path.name,
-            size=sum(len(c) for c in chunks),
-            blocks=chunk_hashes
-        )
+        // Step 5: Create file metadata on server
+        long totalSize = chunks.stream().mapToLong(c -> c.length).sum();
+        api.createFile(CreateFileRequest.builder()
+            .name(filePath.getFileName().toString())
+            .size(totalSize)
+            .blocks(chunkHashes)
+            .build());
+    }
+    
+    /**
+     * Split file into fixed-size chunks for parallel upload
+     * and deduplication.
+     */
+    private List<byte[]> chunkFile(Path filePath) throws IOException {
+        List<byte[]> chunks = new ArrayList<>();
         
-    def watch_changes(self):
-        # File system watcher
-        watcher = FileSystemWatcher(self.sync_folder)
+        try (InputStream inputStream = Files.newInputStream(filePath);
+             BufferedInputStream buffered = new BufferedInputStream(inputStream)) {
+            
+            byte[] buffer = new byte[CHUNK_SIZE];
+            int bytesRead;
+            
+            while ((bytesRead = buffered.read(buffer)) != -1) {
+                byte[] chunk = (bytesRead == CHUNK_SIZE) 
+                    ? buffer.clone() 
+                    : Arrays.copyOf(buffer, bytesRead);
+                chunks.add(chunk);
+            }
+        }
         
-        # Subscribe to server notifications
-        pubsub = redis.subscribe(f"user:{user_id}:changes")
+        return chunks;
+    }
+    
+    /**
+     * Compute SHA-256 hash for content-addressable storage.
+     */
+    private String calculateSha256(byte[] data) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(data);
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                hexString.append(String.format("%02x", b));
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("SHA-256 calculation failed", e);
+        }
+    }
+    
+    /**
+     * Watch for file system changes and trigger sync.
+     * Uses Java WatchService for efficient event-driven detection.
+     */
+    public void startWatching() throws IOException {
+        WatchService watchService = FileSystems.getDefault().newWatchService();
+        syncFolder.register(watchService,
+            StandardWatchEventKinds.ENTRY_CREATE,
+            StandardWatchEventKinds.ENTRY_MODIFY,
+            StandardWatchEventKinds.ENTRY_DELETE);
         
-        for event in watcher:
-            if event.type == 'created' or event.type == 'modified':
-                self.sync_file(event.path)
-            elif event.type == 'deleted':
-                api.delete_file(event.path)
+        // Start server notification listener in separate thread
+        Thread notificationListener = new Thread(this::listenForServerChanges);
+        notificationListener.setDaemon(true);
+        notificationListener.start();
         
-        # Handle server changes
-        for message in pubsub:
-            self.download_file(message.file_id)
+        // Process file system events
+        while (true) {
+            try {
+                WatchKey key = watchService.take();
+                
+                for (WatchEvent<?> event : key.pollEvents()) {
+                    WatchEvent.Kind<?> kind = event.kind();
+                    Path fileName = (Path) event.context();
+                    Path fullPath = syncFolder.resolve(fileName);
+                    
+                    if (kind == StandardWatchEventKinds.ENTRY_CREATE ||
+                        kind == StandardWatchEventKinds.ENTRY_MODIFY) {
+                        syncFile(fullPath);
+                    } else if (kind == StandardWatchEventKinds.ENTRY_DELETE) {
+                        api.deleteFile(fileName.toString());
+                    }
+                }
+                
+                key.reset();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+    }
+    
+    /**
+     * Subscribe to server-side changes via Redis Pub/Sub
+     * for real-time bi-directional sync.
+     */
+    private void listenForServerChanges() {
+        try (Jedis jedis = new Jedis("redis://localhost:6379")) {
+            jedis.subscribe(new JedisPubSub() {
+                @Override
+                public void onMessage(String channel, String message) {
+                    try {
+                        FileChangeEvent event = parseChangeEvent(message);
+                        downloadFile(event.getFileId());
+                    } catch (IOException e) {
+                        System.err.println("Error downloading file: " + e.getMessage());
+                    }
+                }
+            }, "user:" + userId + ":changes");
+        }
+    }
+    
+    private void downloadFile(String fileId) throws IOException {
+        // Download file implementation
+        FileMetadata metadata = api.getFileMetadata(fileId);
+        List<byte[]> chunks = new ArrayList<>();
+        
+        for (String blockHash : metadata.getBlocks()) {
+            byte[] chunk = api.downloadChunk(blockHash);
+            chunks.add(chunk);
+        }
+        
+        // Reassemble file
+        Path targetPath = syncFolder.resolve(metadata.getName());
+        try (OutputStream out = Files.newOutputStream(targetPath)) {
+            for (byte[] chunk : chunks) {
+                out.write(chunk);
+            }
+        }
+    }
+    
+    private FileChangeEvent parseChangeEvent(String message) {
+        // JSON parsing implementation
+        return new ObjectMapper().readValue(message, FileChangeEvent.class);
+    }
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -1803,124 +2185,232 @@ Payment Flow:
 
 **Distributed Lock Implementation**:
 
-```python
-class DistributedLock:
-    def __init__(self, redis_client):
-        self.redis = redis_client
+```java
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Distributed lock implementation using Redis for seat booking.
+ * Supports lock acquisition, release, and extension with ownership verification.
+ */
+public class DistributedLock {
     
-    async def acquire_seat_lock(self, seat_id, session_id, ttl=600):
-        # Lua script for atomic check-and-set
-        script = """
-        if redis.call("GET", KEYS[1]) == ARGV[1] then
-            return redis.call("PEXPIRE", KEYS[1], ARGV[2])
-        else
-            return redis.call("SET", KEYS[1], ARGV[1], "NX", "PX", ARGV[2])
-        end
-        """
-        result = await self.redis.eval(
-            script,
-            keys=[f"seat:{seat_id}:lock"],
-            args=[session_id, ttl * 1000]
-        )
-        return result == 1 or result == "OK"
+    private final RedisTemplate<String, String> redisTemplate;
     
-    async def release_seat_lock(self, seat_id, session_id):
-        # Only release if we own the lock
-        script = """
+    // Lua script for atomic release (only if we own the lock)
+    private static final String RELEASE_SCRIPT = """
         if redis.call("GET", KEYS[1]) == ARGV[1] then
             return redis.call("DEL", KEYS[1])
         else
             return 0
         end
-        """
-        await self.redis.eval(
-            script,
-            keys=[f"seat:{seat_id}:lock"],
-            args=[session_id]
-        )
+        """;
+    
+    // Lua script for atomic extend (only if we own the lock)
+    private static final String EXTEND_SCRIPT = """
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+            return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+        else
+            return 0
+        end
+        """;
+    
+    public DistributedLock(RedisTemplate<String, String> redisTemplate) {
+        this.redisTemplate = redisTemplate;
+    }
+    
+    /**
+     * Attempt to acquire a lock for a seat with automatic expiry.
+     * 
+     * @param seatId The seat identifier to lock
+     * @param sessionId Unique session identifier (lock owner)
+     * @param ttlSeconds Time-to-live for the lock
+     * @return true if lock acquired, false otherwise
+     */
+    public boolean acquireSeatLock(String seatId, String sessionId, long ttlSeconds) {
+        String lockKey = "seat:" + seatId + ":lock";
+        Boolean result = redisTemplate.opsForValue()
+            .setIfAbsent(lockKey, sessionId, ttlSeconds, TimeUnit.SECONDS);
+        return Boolean.TRUE.equals(result);
+    }
+    
+    /**
+     * Release a lock only if the caller owns it.
+     * Uses Lua script for atomic check-and-delete operation.
+     */
+    public void releaseSeatLock(String seatId, String sessionId) {
+        String lockKey = "seat:" + seatId + ":lock";
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(RELEASE_SCRIPT, Long.class);
+        redisTemplate.execute(script, Collections.singletonList(lockKey), sessionId);
+    }
+    
+    /**
+     * Extend the lock TTL if still owned by the caller.
+     * Useful for long-running operations.
+     */
+    public boolean extendLock(String seatId, String sessionId, long ttlMillis) {
+        String lockKey = "seat:" + seatId + ":lock";
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(EXTEND_SCRIPT, Long.class);
+        Long result = redisTemplate.execute(
+            script, 
+            Collections.singletonList(lockKey), 
+            sessionId, 
+            String.valueOf(ttlMillis));
+        return result != null && result == 1;
+    }
+}
 
-# Booking Service
-async def book_seat(user_id, flight_id, seat_id, session_id):
-    lock = DistributedLock(redis)
+/**
+ * Flight booking service with distributed locking and saga pattern
+ * for handling seat reservations with payment processing.
+ */
+@Service
+@Transactional
+public class FlightBookingService {
     
-    # 1. Acquire lock
-    if not await lock.acquire_seat_lock(seat_id, session_id):
-        raise SeatAlreadyHeldError()
+    private final DistributedLock distributedLock;
+    private final SeatRepository seatRepository;
+    private final BookingRepository bookingRepository;
+    private final FlightRepository flightRepository;
+    private final PaymentService paymentService;
+    private final KafkaTemplate<String, InventoryUpdate> kafkaTemplate;
     
-    try:
-        # 2. Hold seat in DB
-        async with db.transaction():
-            await db.execute("""
-                UPDATE seats 
-                SET status = 'held', 
-                    held_until = NOW() + INTERVAL '10 minutes',
-                    held_by_session = ?
-                WHERE id = ? AND status = 'available'
-            """, session_id, seat_id)
+    private static final long SEAT_HOLD_TTL_SECONDS = 600; // 10 minutes
+    
+    @Autowired
+    public FlightBookingService(DistributedLock distributedLock,
+                                 SeatRepository seatRepository,
+                                 BookingRepository bookingRepository,
+                                 FlightRepository flightRepository,
+                                 PaymentService paymentService,
+                                 KafkaTemplate<String, InventoryUpdate> kafkaTemplate) {
+        this.distributedLock = distributedLock;
+        this.seatRepository = seatRepository;
+        this.bookingRepository = bookingRepository;
+        this.flightRepository = flightRepository;
+        this.paymentService = paymentService;
+        this.kafkaTemplate = kafkaTemplate;
+    }
+    
+    /**
+     * Hold a seat temporarily while user completes payment.
+     * Returns a booking hold valid for 10 minutes.
+     */
+    public SeatHoldResponse holdSeat(UUID userId, Long flightId, 
+                                      Long seatId, String sessionId) {
+        // Step 1: Acquire distributed lock
+        if (!distributedLock.acquireSeatLock(seatId.toString(), 
+                                              sessionId, 
+                                              SEAT_HOLD_TTL_SECONDS)) {
+            throw new SeatAlreadyHeldException("Seat is currently held by another user");
+        }
+        
+        try {
+            // Step 2: Update seat status in database
+            int rowsUpdated = seatRepository.holdSeat(
+                seatId, 
+                sessionId,
+                Instant.now().plusSeconds(SEAT_HOLD_TTL_SECONDS));
             
-            if db.rowcount == 0:
-                raise SeatNotAvailableError()
+            if (rowsUpdated == 0) {
+                throw new SeatNotAvailableException("Seat is no longer available");
+            }
+            
+            return new SeatHoldResponse(
+                seatId,
+                Instant.now().plusSeconds(SEAT_HOLD_TTL_SECONDS));
+                
+        } catch (Exception e) {
+            // Release lock on any error
+            distributedLock.releaseSeatLock(seatId.toString(), sessionId);
+            throw e;
+        }
+    }
+    
+    /**
+     * Confirm a booking by processing payment and finalizing the reservation.
+     * Implements saga pattern with compensating transactions for failures.
+     */
+    public Booking confirmBooking(UUID bookingId, PaymentDetails paymentDetails) {
+        Booking booking = bookingRepository.findById(bookingId)
+            .orElseThrow(() -> new BookingNotFoundException("Booking not found"));
         
-        # 3. Return hold confirmation
-        return {"held_until": time.time() + 600}
+        // Idempotency check
+        if (booking.getStatus() == BookingStatus.CONFIRMED) {
+            return booking;
+        }
         
-    except Exception as e:
-        # Release lock on error
-        await lock.release_seat_lock(seat_id, session_id)
-        raise
+        String sessionId = booking.getSessionId();
+        List<Long> seatIds = booking.getSeatIds();
+        
+        try {
+            // Step 1: Process payment
+            PaymentResult paymentResult = paymentService.charge(paymentDetails);
+            
+            // Step 2: Confirm booking atomically
+            bookingRepository.confirmBooking(
+                bookingId,
+                paymentResult.getPaymentId(),
+                Instant.now());
+            
+            // Step 3: Update seat status to booked
+            seatRepository.confirmBooking(seatIds);
+            
+            // Step 4: Decrement flight available seats
+            flightRepository.decrementAvailableSeats(
+                booking.getFlightId(), 
+                seatIds.size());
+            
+            // Step 5: Publish inventory update to aggregators
+            kafkaTemplate.send("inventory-updates", InventoryUpdate.builder()
+                .flightId(booking.getFlightId())
+                .seatsBooked(seatIds)
+                .timestamp(Instant.now())
+                .build());
+            
+            // Step 6: Release distributed lock
+            for (Long seatId : seatIds) {
+                distributedLock.releaseSeatLock(seatId.toString(), sessionId);
+            }
+            
+            booking.setStatus(BookingStatus.CONFIRMED);
+            return booking;
+            
+        } catch (PaymentException e) {
+            // Compensating transaction: release held seats
+            executeCompensation(seatIds, sessionId);
+            throw new BookingFailedException("Payment failed: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Execute compensating transaction to release seats on failure.
+     */
+    private void executeCompensation(List<Long> seatIds, String sessionId) {
+        seatRepository.releaseSeatsByIds(seatIds);
+        for (Long seatId : seatIds) {
+            distributedLock.releaseSeatLock(seatId.toString(), sessionId);
+        }
+    }
+}
 
-# Payment completion
-async def confirm_booking(booking_id, payment_details):
-    booking = await db.get_booking(booking_id)
-    
-    # Idempotency check
-    if booking.status == 'confirmed':
-        return booking
-    
-    # Begin saga
-    try:
-        # 1. Process payment
-        payment_result = await payment_service.charge(payment_details)
-        
-        # 2. Confirm booking atomically
-        async with db.transaction():
-            await db.execute("""
-                UPDATE bookings SET status = 'confirmed', 
-                    payment_id = ?, confirmed_at = NOW()
-                WHERE id = ?
-            """, payment_result.id, booking_id)
-            
-            await db.execute("""
-                UPDATE seats SET status = 'booked'
-                WHERE id IN (?)
-            """, booking.seat_ids)
-            
-            await db.execute("""
-                UPDATE flights 
-                SET available_seats = available_seats - ?
-                WHERE id = ?
-            """, len(booking.seat_ids), booking.flight_id)
-        
-        # 3. Sync to aggregators
-        await kafka.publish('inventory-updates', {
-            'flight_id': booking.flight_id,
-            'seats_booked': booking.seat_ids,
-            'timestamp': time.time()
-        })
-        
-        # 4. Release lock
-        await lock.release_seat_lock(booking.seat_ids[0], booking.session_id)
-        
-        return booking
-        
-    except PaymentError as e:
-        # Compensating transaction
-        await db.execute("""
-            UPDATE seats SET status = 'available', held_until = NULL
-            WHERE id IN (?)
-        """, booking.seat_ids)
-        await lock.release_seat_lock(booking.seat_ids[0], booking.session_id)
-        raise
+/**
+ * Response DTO for seat hold operation.
+ */
+public record SeatHoldResponse(Long seatId, Instant heldUntil) {}
+
+/**
+ * Builder pattern for inventory updates sent to external aggregators.
+ */
+@Builder
+@Data
+public class InventoryUpdate {
+    private Long flightId;
+    private List<Long> seatsBooked;
+    private Instant timestamp;
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -2072,40 +2562,167 @@ class ProviderRateLimiter:
 
 **Cross-DC Synchronization**:
 
-```python
-# Price update propagation
-async def update_price(route_id, provider, price):
-    # 1. Update local cache
-    await redis.setex(
-        f"price:{route_id}:{provider}",
-        ttl=300,  # 5 min
-        json.dumps(price)
-    )
-    
-    # 2. Persist to Cassandra (multi-DC)
-    await cassandra.execute("""
-        INSERT INTO price_snapshots 
-        (route_id, provider, timestamp, price, currency)
-        VALUES (?, ?, ?, ?, ?)
-    """, route_id, provider, datetime.now(), price.amount, price.currency)
-    
-    # 3. Publish to other DCs via Kafka
-    await kafka.publish('price-updates', {
-        'route_id': route_id,
-        'provider': provider,
-        'price': price,
-        'dc': 'us-east-1'
-    })
+```java
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.data.redis.core.RedisTemplate;
+import com.datastax.oss.driver.api.core.CqlSession;
+import java.time.*;
+import java.util.concurrent.*;
 
-# Other DCs consume and update their local cache
-async def consume_price_updates():
-    async for message in kafka.consume('price-updates'):
-        if message.dc != CURRENT_DC:
-            await redis.setex(
-                f"price:{message.route_id}:{message.provider}",
-                ttl=300,
-                json.dumps(message.price)
-            )
+/**
+ * Service for managing flight prices with cross-datacenter synchronization.
+ * Maintains local Redis cache with Cassandra as persistent store and 
+ * Kafka for inter-DC event propagation.
+ */
+@Service
+public class PriceSyncService {
+    
+    private final RedisTemplate<String, String> redisTemplate;
+    private final CqlSession cassandraSession;
+    private final KafkaTemplate<String, PriceUpdateEvent> kafkaTemplate;
+    private final String currentDatacenter;
+    
+    private static final Duration CACHE_TTL = Duration.ofMinutes(5);
+    private static final String PRICE_UPDATE_TOPIC = "price-updates";
+    
+    @Autowired
+    public PriceSyncService(RedisTemplate<String, String> redisTemplate,
+                            CqlSession cassandraSession,
+                            KafkaTemplate<String, PriceUpdateEvent> kafkaTemplate,
+                            @Value("${datacenter.id}") String currentDatacenter) {
+        this.redisTemplate = redisTemplate;
+        this.cassandraSession = cassandraSession;
+        this.kafkaTemplate = kafkaTemplate;
+        this.currentDatacenter = currentDatacenter;
+    }
+    
+    /**
+     * Update flight price in local cache, persistent store, and propagate to other DCs.
+     * Implements eventual consistency across datacenters.
+     */
+    public CompletableFuture<Void> updatePrice(String routeId, String provider, 
+                                                Price price) {
+        String cacheKey = String.format("price:%s:%s", routeId, provider);
+        
+        // Step 1: Update local Redis cache immediately for low latency
+        String priceJson = serializePrice(price);
+        redisTemplate.opsForValue().set(cacheKey, priceJson, CACHE_TTL);
+        
+        // Step 2: Persist to Cassandra (multi-DC replication handled by Cassandra)
+        return CompletableFuture.runAsync(() -> {
+            persistToCassandra(routeId, provider, price);
+        }).thenCompose(v -> {
+            // Step 3: Publish to Kafka for other DCs to update their local caches
+            PriceUpdateEvent event = PriceUpdateEvent.builder()
+                .routeId(routeId)
+                .provider(provider)
+                .price(price)
+                .datacenter(currentDatacenter)
+                .timestamp(Instant.now())
+                .build();
+            
+            return kafkaTemplate.send(PRICE_UPDATE_TOPIC, routeId, event)
+                .thenApply(result -> null);
+        });
+    }
+    
+    private void persistToCassandra(String routeId, String provider, Price price) {
+        String insertQuery = """
+            INSERT INTO price_snapshots 
+            (route_id, provider, timestamp, price, currency)
+            VALUES (?, ?, ?, ?, ?)
+            """;
+        
+        cassandraSession.execute(
+            cassandraSession.prepare(insertQuery).bind(
+                routeId,
+                provider,
+                Instant.now(),
+                price.getAmount(),
+                price.getCurrency()
+            ));
+    }
+    
+    private String serializePrice(Price price) {
+        try {
+            return new ObjectMapper().writeValueAsString(price);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize price", e);
+        }
+    }
+}
+
+/**
+ * Kafka consumer for processing price updates from other datacenters.
+ * Updates local Redis cache to maintain cross-DC consistency.
+ */
+@Component
+public class PriceUpdateConsumer {
+    
+    private final RedisTemplate<String, String> redisTemplate;
+    private final String currentDatacenter;
+    
+    private static final Duration CACHE_TTL = Duration.ofMinutes(5);
+    
+    @Autowired
+    public PriceUpdateConsumer(RedisTemplate<String, String> redisTemplate,
+                               @Value("${datacenter.id}") String currentDatacenter) {
+        this.redisTemplate = redisTemplate;
+        this.currentDatacenter = currentDatacenter;
+    }
+    
+    /**
+     * Consume price updates from other DCs and update local cache.
+     * Ignores events originating from this datacenter (already processed locally).
+     */
+    @KafkaListener(topics = "price-updates", groupId = "${datacenter.id}-price-consumer")
+    public void consumePriceUpdate(PriceUpdateEvent event) {
+        // Skip events from this datacenter (already updated locally)
+        if (currentDatacenter.equals(event.getDatacenter())) {
+            return;
+        }
+        
+        String cacheKey = String.format("price:%s:%s", 
+            event.getRouteId(), event.getProvider());
+        
+        String priceJson = serializePrice(event.getPrice());
+        redisTemplate.opsForValue().set(cacheKey, priceJson, CACHE_TTL);
+    }
+    
+    private String serializePrice(Price price) {
+        try {
+            return new ObjectMapper().writeValueAsString(price);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize price", e);
+        }
+    }
+}
+
+/**
+ * Event representing a price update for cross-DC propagation.
+ */
+@Builder
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class PriceUpdateEvent {
+    private String routeId;
+    private String provider;
+    private Price price;
+    private String datacenter;
+    private Instant timestamp;
+}
+
+/**
+ * Value object representing a flight price.
+ */
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class Price {
+    private BigDecimal amount;
+    private String currency;
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -2517,50 +3134,191 @@ Last seen = Last heartbeat timestamp
 
 **WebSocket Connection Management**:
 
-```python
-class GatewayServer:
-    def __init__(self):
-        self.connections = {}  # user_id -> WebSocket
-        self.redis = Redis()
+```java
+import org.springframework.web.socket.*;
+import org.springframework.data.redis.core.RedisTemplate;
+import java.util.concurrent.*;
+import java.util.*;
+
+/**
+ * WebSocket gateway server for real-time messaging.
+ * Manages persistent connections and routes messages between users.
+ */
+@Component
+public class GatewayServer implements WebSocketHandler {
     
-    async def on_connect(self, ws, user_id):
-        # Store connection
-        self.connections[user_id] = ws
-        
-        # Register in Redis (for routing)
-        await self.redis.hset('user:gateway', user_id, GATEWAY_ID)
-        await self.redis.setex(f'user:{user_id}:online', 60, '1')
-        
-        # Deliver pending messages
-        pending = await self.fetch_pending_messages(user_id)
-        for msg in pending:
-            await ws.send(msg)
+    private final ConcurrentMap<String, WebSocketSession> connections = 
+        new ConcurrentHashMap<>();
+    private final RedisTemplate<String, String> redisTemplate;
+    private final MessageStorageService messageStorage;
+    private final KafkaTemplate<String, Message> kafkaTemplate;
     
-    async def on_message(self, user_id, message):
-        recipient_id = message.recipient_id
-        
-        # Find recipient's gateway
-        gateway_id = await self.redis.hget('user:gateway', recipient_id)
-        
-        if gateway_id:
-            # Recipient online - direct delivery
-            if gateway_id == GATEWAY_ID:
-                # Same gateway
-                await self.connections[recipient_id].send(message)
-            else:
-                # Different gateway - use inter-gateway messaging
-                await self.send_to_gateway(gateway_id, message)
-        else:
-            # Recipient offline - queue message
-            await kafka.publish('offline_messages', message)
-        
-        # Store in Cassandra (async)
-        await cassandra.insert_message(message)
+    private static final String GATEWAY_ID = System.getenv("GATEWAY_ID");
+    private static final Duration ONLINE_STATUS_TTL = Duration.ofSeconds(60);
     
-    async def on_disconnect(self, user_id):
-        del self.connections[user_id]
-        await self.redis.hdel('user:gateway', user_id)
-        await self.redis.delete(f'user:{user_id}:online')
+    @Autowired
+    public GatewayServer(RedisTemplate<String, String> redisTemplate,
+                         MessageStorageService messageStorage,
+                         KafkaTemplate<String, Message> kafkaTemplate) {
+        this.redisTemplate = redisTemplate;
+        this.messageStorage = messageStorage;
+        this.kafkaTemplate = kafkaTemplate;
+    }
+    
+    /**
+     * Handle new WebSocket connection.
+     * Registers user presence and delivers pending messages.
+     */
+    @Override
+    public void afterConnectionEstablished(WebSocketSession session) throws Exception {
+        String userId = extractUserId(session);
+        
+        // Store connection locally
+        connections.put(userId, session);
+        
+        // Register in Redis for routing from other gateways
+        redisTemplate.opsForHash().put("user:gateway", userId, GATEWAY_ID);
+        
+        // Set online status with TTL
+        redisTemplate.opsForValue().set(
+            "user:" + userId + ":online", 
+            "1", 
+            ONLINE_STATUS_TTL);
+        
+        // Deliver any pending messages
+        List<Message> pendingMessages = messageStorage.getPendingMessages(userId);
+        for (Message message : pendingMessages) {
+            sendMessage(session, message);
+        }
+    }
+    
+    /**
+     * Handle incoming message from a connected user.
+     * Routes to recipient if online, otherwise queues for later delivery.
+     */
+    @Override
+    public void handleMessage(WebSocketSession session, WebSocketMessage<?> webSocketMessage) 
+            throws Exception {
+        String senderId = extractUserId(session);
+        Message message = parseMessage(webSocketMessage.getPayload().toString());
+        message.setSenderId(senderId);
+        message.setTimestamp(Instant.now());
+        
+        String recipientId = message.getRecipientId();
+        
+        // Find recipient's gateway
+        String recipientGateway = (String) redisTemplate.opsForHash()
+            .get("user:gateway", recipientId);
+        
+        if (recipientGateway != null) {
+            // Recipient is online
+            if (GATEWAY_ID.equals(recipientGateway)) {
+                // Same gateway - deliver directly
+                WebSocketSession recipientSession = connections.get(recipientId);
+                if (recipientSession != null && recipientSession.isOpen()) {
+                    sendMessage(recipientSession, message);
+                }
+            } else {
+                // Different gateway - route via inter-gateway messaging
+                sendToGateway(recipientGateway, message);
+            }
+        } else {
+            // Recipient offline - queue for later delivery
+            kafkaTemplate.send("offline_messages", recipientId, message);
+        }
+        
+        // Store in Cassandra asynchronously for persistence
+        messageStorage.storeMessage(message);
+    }
+    
+    /**
+     * Handle connection close.
+     * Cleans up presence data and updates last seen timestamp.
+     */
+    @Override
+    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) 
+            throws Exception {
+        String userId = extractUserId(session);
+        
+        connections.remove(userId);
+        redisTemplate.opsForHash().delete("user:gateway", userId);
+        redisTemplate.delete("user:" + userId + ":online");
+        
+        // Update last seen timestamp
+        redisTemplate.opsForValue().set(
+            "user:" + userId + ":last_seen", 
+            Instant.now().toString());
+    }
+    
+    /**
+     * Send message to inter-gateway messaging system for routing
+     * to another gateway server.
+     */
+    private void sendToGateway(String gatewayId, Message message) {
+        kafkaTemplate.send("gateway-messages-" + gatewayId, message);
+    }
+    
+    /**
+     * Listen for messages from other gateways destined for local users.
+     */
+    @KafkaListener(topics = "gateway-messages-${GATEWAY_ID}")
+    public void handleInterGatewayMessage(Message message) {
+        String recipientId = message.getRecipientId();
+        WebSocketSession session = connections.get(recipientId);
+        
+        if (session != null && session.isOpen()) {
+            try {
+                sendMessage(session, message);
+            } catch (IOException e) {
+                // Log error and queue for retry
+            }
+        }
+    }
+    
+    private void sendMessage(WebSocketSession session, Message message) 
+            throws IOException {
+        String json = new ObjectMapper().writeValueAsString(message);
+        session.sendMessage(new TextMessage(json));
+    }
+    
+    private String extractUserId(WebSocketSession session) {
+        return session.getAttributes().get("userId").toString();
+    }
+    
+    private Message parseMessage(String payload) throws JsonProcessingException {
+        return new ObjectMapper().readValue(payload, Message.class);
+    }
+    
+    @Override
+    public void handleTransportError(WebSocketSession session, Throwable exception) {
+        // Log transport errors
+    }
+    
+    @Override
+    public boolean supportsPartialMessages() {
+        return false;
+    }
+}
+
+/**
+ * Message entity for real-time messaging.
+ */
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class Message {
+    private String messageId;
+    private String senderId;
+    private String recipientId;
+    private byte[] content; // Encrypted content
+    private String mediaUrl;
+    private MessageStatus status;
+    private Instant timestamp;
+}
+
+public enum MessageStatus {
+    SENT, DELIVERED, READ
+}
 ```
 
 **End-to-End Encryption**:
@@ -2795,43 +3553,179 @@ Reminder System:
 
 **Cancellation and Waitlist**:
 
-```python
-async def cancel_appointment(appointment_id, cancelled_by):
-    async with db.transaction():
-        # Update appointment status
-        await db.execute("""
-            UPDATE appointments 
-            SET status = 'cancelled', cancelled_at = NOW()
-            WHERE id = ?
-        """, appointment_id)
+```java
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import java.time.*;
+import java.util.*;
+
+/**
+ * Service handling appointment cancellations with automatic waitlist management.
+ * Notifies waitlisted patients when slots become available.
+ */
+@Service
+public class AppointmentCancellationService {
+    
+    private final AppointmentRepository appointmentRepository;
+    private final WaitlistRepository waitlistRepository;
+    private final NotificationService notificationService;
+    private final BookingService bookingService;
+    
+    @Autowired
+    public AppointmentCancellationService(AppointmentRepository appointmentRepository,
+                                          WaitlistRepository waitlistRepository,
+                                          NotificationService notificationService,
+                                          BookingService bookingService) {
+        this.appointmentRepository = appointmentRepository;
+        this.waitlistRepository = waitlistRepository;
+        this.notificationService = notificationService;
+        this.bookingService = bookingService;
+    }
+    
+    /**
+     * Cancel an appointment and offer the freed slot to waitlisted patients.
+     * Supports auto-booking for patients who opted in.
+     */
+    @Transactional
+    public CancellationResult cancelAppointment(UUID appointmentId, String cancelledBy) {
+        // Step 1: Update appointment status
+        Appointment appointment = appointmentRepository.findById(appointmentId)
+            .orElseThrow(() -> new AppointmentNotFoundException(appointmentId));
         
-        # Get appointment details
-        appt = await db.get_appointment(appointment_id)
+        appointment.setStatus(AppointmentStatus.CANCELLED);
+        appointment.setCancelledAt(Instant.now());
+        appointment.setCancelledBy(cancelledBy);
+        appointmentRepository.save(appointment);
         
-        # Check waitlist
-        waitlist = await db.query("""
-            SELECT * FROM waitlist
-            WHERE doctor_id = ? 
-              AND preferred_date = ?
-            ORDER BY created_at
-            LIMIT 1
-        """, appt.doctor_id, appt.appointment_date)
+        // Step 2: Check waitlist for this slot
+        Optional<WaitlistEntry> waitlistEntry = waitlistRepository
+            .findFirstByDoctorIdAndPreferredDateOrderByCreatedAtAsc(
+                appointment.getDoctorId(),
+                appointment.getAppointmentDate());
         
-        if waitlist:
-            # Notify waitlisted patient
-            await notification_service.send(
-                waitlist.patient_id,
-                f"Slot available: {appt.appointment_date} {appt.start_time}"
-            )
+        if (waitlistEntry.isPresent()) {
+            WaitlistEntry entry = waitlistEntry.get();
             
-            # Auto-book if patient configured
-            if waitlist.auto_book:
-                await book_appointment(
-                    waitlist.patient_id,
-                    appt.doctor_id,
-                    appt.appointment_date,
-                    appt.start_time
-                )
+            // Step 3: Notify waitlisted patient about availability
+            String message = String.format(
+                "A slot is now available on %s at %s",
+                appointment.getAppointmentDate(),
+                appointment.getStartTime());
+            
+            notificationService.sendNotification(
+                entry.getPatientId(),
+                NotificationType.SLOT_AVAILABLE,
+                message);
+            
+            // Step 4: Auto-book if patient configured this preference
+            if (entry.isAutoBook()) {
+                try {
+                    Booking newBooking = bookingService.createBooking(
+                        entry.getPatientId(),
+                        appointment.getDoctorId(),
+                        appointment.getAppointmentDate(),
+                        appointment.getStartTime());
+                    
+                    // Remove from waitlist after successful booking
+                    waitlistRepository.delete(entry);
+                    
+                    return CancellationResult.withAutoBooking(appointment, newBooking);
+                } catch (BookingException e) {
+                    // Auto-booking failed, just notify
+                    return CancellationResult.withNotification(appointment, entry.getPatientId());
+                }
+            }
+            
+            return CancellationResult.withNotification(appointment, entry.getPatientId());
+        }
+        
+        return CancellationResult.cancelled(appointment);
+    }
+    
+    /**
+     * Add patient to waitlist for a specific doctor and date.
+     */
+    @Transactional
+    public WaitlistEntry addToWaitlist(UUID patientId, UUID doctorId, 
+                                        LocalDate preferredDate, boolean autoBook) {
+        // Check if already on waitlist
+        if (waitlistRepository.existsByPatientIdAndDoctorIdAndPreferredDate(
+                patientId, doctorId, preferredDate)) {
+            throw new DuplicateWaitlistEntryException();
+        }
+        
+        WaitlistEntry entry = WaitlistEntry.builder()
+            .patientId(patientId)
+            .doctorId(doctorId)
+            .preferredDate(preferredDate)
+            .autoBook(autoBook)
+            .createdAt(Instant.now())
+            .build();
+        
+        return waitlistRepository.save(entry);
+    }
+}
+
+/**
+ * Result of a cancellation operation, including any auto-booking actions.
+ */
+@Data
+@Builder
+public class CancellationResult {
+    private Appointment cancelledAppointment;
+    private Booking autoBookedAppointment;
+    private UUID notifiedPatientId;
+    private CancellationOutcome outcome;
+    
+    public static CancellationResult cancelled(Appointment appointment) {
+        return CancellationResult.builder()
+            .cancelledAppointment(appointment)
+            .outcome(CancellationOutcome.CANCELLED)
+            .build();
+    }
+    
+    public static CancellationResult withNotification(Appointment appointment, 
+                                                       UUID patientId) {
+        return CancellationResult.builder()
+            .cancelledAppointment(appointment)
+            .notifiedPatientId(patientId)
+            .outcome(CancellationOutcome.WAITLIST_NOTIFIED)
+            .build();
+    }
+    
+    public static CancellationResult withAutoBooking(Appointment appointment, 
+                                                      Booking booking) {
+        return CancellationResult.builder()
+            .cancelledAppointment(appointment)
+            .autoBookedAppointment(booking)
+            .outcome(CancellationOutcome.AUTO_BOOKED)
+            .build();
+    }
+}
+
+public enum CancellationOutcome {
+    CANCELLED, WAITLIST_NOTIFIED, AUTO_BOOKED
+}
+
+/**
+ * Entity representing a waitlist entry for appointment slots.
+ */
+@Entity
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class WaitlistEntry {
+    @Id
+    @GeneratedValue
+    private UUID id;
+    
+    private UUID patientId;
+    private UUID doctorId;
+    private LocalDate preferredDate;
+    private boolean autoBook;
+    private Instant createdAt;
+}
 ```
 
 ### Trade-offs & Assumptions
@@ -3039,100 +3933,86 @@ Booking Flow:
 
 **Distributed Lock Implementation**:
 
-```python
-class DistributedLock:
-    def __init__(self, redis_client):
-        self.redis = redis_client
+```java
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.stereotype.Component;
+import java.time.*;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Distributed lock implementation for hotel room reservations.
+ * Uses Redis with Lua scripts for atomic operations.
+ */
+@Component
+public class HotelDistributedLock {
     
-    async def acquire(self, lock_key, value, ttl_seconds=30):
-        """Acquire lock with automatic expiry"""
-        result = await self.redis.set(
-            lock_key,
-            value,
-            nx=True,  # Only set if not exists
-            ex=ttl_seconds
-        )
-        return result is not None
+    private final RedisTemplate<String, String> redisTemplate;
     
-    async def release(self, lock_key, value):
-        """Release lock only if we own it"""
-        lua_script = """
+    /**
+     * Lua script for atomic release - only releases if caller owns the lock.
+     */
+    private static final String RELEASE_SCRIPT = """
         if redis.call("GET", KEYS[1]) == ARGV[1] then
             return redis.call("DEL", KEYS[1])
         else
             return 0
         end
-        """
-        await self.redis.eval(lua_script, 1, lock_key, value)
+        """;
     
-    async def extend(self, lock_key, value, ttl_seconds):
-        """Extend lock TTL if we own it"""
-        lua_script = """
+    /**
+     * Lua script for atomic extend - only extends if caller owns the lock.
+     */
+    private static final String EXTEND_SCRIPT = """
         if redis.call("GET", KEYS[1]) == ARGV[1] then
             return redis.call("EXPIRE", KEYS[1], ARGV[2])
         else
             return 0
         end
-        """
-        await self.redis.eval(lua_script, 1, lock_key, value, ttl_seconds)
-
-# Booking service
-async def book_room(user_id, room_id, check_in, check_out):
-    lock_key = f"room:{room_id}:{check_in}:{check_out}"
-    session_id = generate_session_id()
-    lock = DistributedLock(redis)
+        """;
     
-    # Try to acquire lock
-    if not await lock.acquire(lock_key, session_id, ttl_seconds=30):
-        raise BookingInProgressError("Another user is booking this room")
+    public HotelDistributedLock(RedisTemplate<String, String> redisTemplate) {
+        this.redisTemplate = redisTemplate;
+    }
     
-    try:
-        async with db.transaction(isolation='serializable'):
-            # Check availability for all nights
-            nights = get_date_range(check_in, check_out)
-            availability = await db.query("""
-                SELECT date, available_rooms
-                FROM room_inventory
-                WHERE room_id = ? AND date = ANY(?)
-                FOR UPDATE
-            """, room_id, nights)
-            
-            if len(availability) != len(nights):
-                raise NoInventoryError("Missing inventory data")
-            
-            if any(row['available_rooms'] < 1 for row in availability):
-                raise NoAvailabilityError("Room not available")
-            
-            # Decrement inventory
-            await db.execute("""
-                UPDATE room_inventory
-                SET available_rooms = available_rooms - 1
-                WHERE room_id = ? AND date = ANY(?)
-            """, room_id, nights)
-            
-            # Create reservation
-            reservation_id = await db.insert_reservation(
-                user_id, room_id, check_in, check_out
-            )
-            
-            # Process payment
-            payment = await payment_service.charge(user_id, total_price)
-            
-            # Update reservation with payment
-            await db.execute("""
-                UPDATE reservations
-                SET status = 'confirmed', payment_id = ?
-                WHERE id = ?
-            """, payment.id, reservation_id)
-            
-            return reservation_id
-            
-    except Exception as e:
-        # Transaction will auto-rollback
-        raise
-    finally:
-        # Always release lock
-        await lock.release(lock_key, session_id)
+    /**
+     * Acquire a lock for a room booking with automatic expiry.
+     * 
+     * @param lockKey Unique key for the lock (e.g., "room:101:2024-12-15:2024-12-17")
+     * @param value Unique identifier for the lock holder (session ID)
+     * @param ttlSeconds Lock expiry time in seconds
+     * @return true if lock acquired successfully
+     */
+    public boolean acquire(String lockKey, String value, int ttlSeconds) {
+        Boolean result = redisTemplate.opsForValue()
+            .setIfAbsent(lockKey, value, ttlSeconds, TimeUnit.SECONDS);
+        return Boolean.TRUE.equals(result);
+    }
+    
+    /**
+     * Release a lock only if the caller owns it.
+     * Prevents accidental release of locks held by other processes.
+     */
+    public void release(String lockKey, String value) {
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(RELEASE_SCRIPT, Long.class);
+        redisTemplate.execute(script, Collections.singletonList(lockKey), value);
+    }
+    
+    /**
+     * Extend lock TTL if still owned by the caller.
+     * Useful for long-running booking operations.
+     */
+    public boolean extend(String lockKey, String value, int ttlSeconds) {
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(EXTEND_SCRIPT, Long.class);
+        Long result = redisTemplate.execute(
+            script, 
+            Collections.singletonList(lockKey), 
+            value, 
+            String.valueOf(ttlSeconds));
+        return result != null && result == 1;
+    }
+}
 ```
 
 **Optimistic Locking with Version**:
@@ -3242,34 +4122,192 @@ Request Flow:
 
 **Example Implementation**:
 
-```python
-class MultiLevelCache:
-    def __init__(self):
-        self.local_cache = LRUCache(capacity=1000)
-        self.redis = Redis()
-        self.db = Database()
+```java
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import org.springframework.data.redis.core.RedisTemplate;
+import java.time.Duration;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+
+/**
+ * Multi-level caching implementation with L1 (local), L2 (Redis), and L3 (database).
+ * Provides optimal performance by checking fastest storage first.
+ * 
+ * Access Time Comparison:
+ * - L1 (Local): ~0.1ms
+ * - L2 (Redis): ~2ms  
+ * - L3 (Database): ~50ms
+ */
+public class MultiLevelCache<K, V> {
     
-    async def get(self, key):
-        # L1: Local cache
-        value = self.local_cache.get(key)
-        if value:
-            return value
+    // L1: In-process local cache (Caffeine)
+    private final Cache<K, V> localCache;
+    
+    // L2: Distributed cache (Redis)
+    private final RedisTemplate<String, V> redisTemplate;
+    private final String cachePrefix;
+    
+    // L3: Database (accessed via supplier function)
+    private final Duration l2CacheTtl;
+    
+    public MultiLevelCache(RedisTemplate<String, V> redisTemplate,
+                          String cachePrefix,
+                          int localCacheCapacity,
+                          Duration localCacheTtl,
+                          Duration l2CacheTtl) {
+        this.redisTemplate = redisTemplate;
+        this.cachePrefix = cachePrefix;
+        this.l2CacheTtl = l2CacheTtl;
         
-        # L2: Global cache (Redis)
-        value = await self.redis.get(key)
-        if value:
-            self.local_cache.set(key, value)
-            return value
+        // Configure L1 cache with size limit and expiry
+        this.localCache = Caffeine.newBuilder()
+            .maximumSize(localCacheCapacity)
+            .expireAfterWrite(localCacheTtl)
+            .recordStats()
+            .build();
+    }
+    
+    /**
+     * Get value from cache hierarchy, loading from database if necessary.
+     * 
+     * @param key Cache key
+     * @param databaseLoader Function to load from database on cache miss
+     * @return Optional containing the value if found/loaded
+     */
+    public Optional<V> get(K key, Supplier<Optional<V>> databaseLoader) {
+        // L1: Check local cache first (fastest)
+        V value = localCache.getIfPresent(key);
+        if (value != null) {
+            return Optional.of(value);
+        }
         
-        # L3: Database
-        value = await self.db.query(key)
-        if value:
-            # Populate both caches
-            await self.redis.setex(key, 3600, value)  # 1 hour
-            self.local_cache.set(key, value)  # In-memory
-            return value
+        // L2: Check Redis (distributed cache)
+        String redisKey = buildRedisKey(key);
+        value = redisTemplate.opsForValue().get(redisKey);
+        if (value != null) {
+            // Populate L1 for subsequent requests
+            localCache.put(key, value);
+            return Optional.of(value);
+        }
         
-        return None
+        // L3: Load from database
+        Optional<V> dbResult = databaseLoader.get();
+        if (dbResult.isPresent()) {
+            value = dbResult.get();
+            // Populate both L1 and L2 caches
+            localCache.put(key, value);
+            redisTemplate.opsForValue().set(redisKey, value, l2CacheTtl);
+        }
+        
+        return dbResult;
+    }
+    
+    /**
+     * Put value directly into all cache levels.
+     * Use after database writes to keep caches warm.
+     */
+    public void put(K key, V value) {
+        localCache.put(key, value);
+        String redisKey = buildRedisKey(key);
+        redisTemplate.opsForValue().set(redisKey, value, l2CacheTtl);
+    }
+    
+    /**
+     * Invalidate a key across all cache levels.
+     * Call this when the underlying data changes.
+     */
+    public void invalidate(K key) {
+        localCache.invalidate(key);
+        String redisKey = buildRedisKey(key);
+        redisTemplate.delete(redisKey);
+    }
+    
+    /**
+     * Invalidate all entries in L1 cache.
+     * L2 entries will expire via TTL.
+     */
+    public void invalidateAll() {
+        localCache.invalidateAll();
+    }
+    
+    private String buildRedisKey(K key) {
+        return cachePrefix + ":" + key.toString();
+    }
+    
+    /**
+     * Get cache statistics for monitoring.
+     */
+    public CacheStatistics getStatistics() {
+        var stats = localCache.stats();
+        return new CacheStatistics(
+            stats.hitRate(),
+            stats.missRate(),
+            stats.evictionCount(),
+            localCache.estimatedSize()
+        );
+    }
+}
+
+/**
+ * Cache statistics for monitoring dashboard.
+ */
+public record CacheStatistics(
+    double hitRate,
+    double missRate,
+    long evictionCount,
+    long currentSize
+) {}
+
+/**
+ * Example usage with a User entity.
+ */
+@Service
+public class UserService {
+    
+    private final MultiLevelCache<UUID, User> userCache;
+    private final UserRepository userRepository;
+    
+    @Autowired
+    public UserService(RedisTemplate<String, User> redisTemplate,
+                       UserRepository userRepository) {
+        this.userRepository = userRepository;
+        this.userCache = new MultiLevelCache<>(
+            redisTemplate,
+            "user",           // Redis key prefix
+            1000,             // L1 capacity
+            Duration.ofMinutes(5),  // L1 TTL
+            Duration.ofHours(1)     // L2 TTL
+        );
+    }
+    
+    public Optional<User> getUser(UUID userId) {
+        return userCache.get(userId, 
+            () -> userRepository.findById(userId));
+    }
+    
+    @Transactional
+    public User updateUser(UUID userId, UserUpdateRequest request) {
+        User user = userRepository.findById(userId)
+            .orElseThrow(() -> new UserNotFoundException(userId));
+        
+        user.setName(request.getName());
+        user.setEmail(request.getEmail());
+        user = userRepository.save(user);
+        
+        // Update cache after write
+        userCache.put(userId, user);
+        
+        return user;
+    }
+    
+    @Transactional
+    public void deleteUser(UUID userId) {
+        userRepository.deleteById(userId);
+        userCache.invalidate(userId);
+    }
+}
 ```
 
 ### Comparison Table
@@ -3374,27 +4412,122 @@ user_id → hash(user_id) % 1000 → position → shard
 
 **Sharding Implementation**:
 
-```python
-class ShardRouter:
-    def __init__(self, shards):
-        self.shards = shards
-        self.num_shards = len(shards)
+```java
+import java.util.*;
+import java.sql.*;
+import javax.sql.DataSource;
+
+/**
+ * Router for hash-based database sharding.
+ * Distributes data across multiple database shards using consistent hashing.
+ */
+public class ShardRouter {
     
-    def get_shard(self, user_id):
-        # Hash-based sharding
-        shard_id = hash(user_id) % self.num_shards
-        return self.shards[shard_id]
+    private final List<DataSource> shards;
+    private final int numShards;
     
-    def query(self, user_id):
-        shard = self.get_shard(user_id)
-        return shard.query(f"SELECT * FROM users WHERE id = {user_id}")
+    public ShardRouter(List<DataSource> shards) {
+        this.shards = new ArrayList<>(shards);
+        this.numShards = shards.size();
+    }
     
-    def query_all_shards(self, query):
-        # Fan-out query to all shards
-        results = []
-        for shard in self.shards:
-            results.extend(shard.query(query))
-        return results
+    /**
+     * Determine which shard contains data for a given user.
+     * Uses hash-based routing for even distribution.
+     */
+    public DataSource getShardForUser(UUID userId) {
+        int shardId = Math.abs(userId.hashCode() % numShards);
+        return shards.get(shardId);
+    }
+    
+    /**
+     * Query a specific user from their designated shard.
+     */
+    public Optional<User> queryUser(UUID userId) throws SQLException {
+        DataSource shard = getShardForUser(userId);
+        
+        String sql = "SELECT * FROM users WHERE id = ?";
+        try (Connection conn = shard.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            
+            stmt.setObject(1, userId);
+            ResultSet rs = stmt.executeQuery();
+            
+            if (rs.next()) {
+                return Optional.of(mapToUser(rs));
+            }
+            return Optional.empty();
+        }
+    }
+    
+    /**
+     * Execute a query across all shards (scatter-gather pattern).
+     * Use sparingly as this is expensive.
+     */
+    public List<User> queryAllShards(String sql, Object... params) throws SQLException {
+        List<User> results = new ArrayList<>();
+        
+        for (DataSource shard : shards) {
+            try (Connection conn = shard.getConnection();
+                 PreparedStatement stmt = conn.prepareStatement(sql)) {
+                
+                for (int i = 0; i < params.length; i++) {
+                    stmt.setObject(i + 1, params[i]);
+                }
+                
+                ResultSet rs = stmt.executeQuery();
+                while (rs.next()) {
+                    results.add(mapToUser(rs));
+                }
+            }
+        }
+        
+        return results;
+    }
+    
+    /**
+     * Execute query across all shards in parallel for better performance.
+     */
+    public List<User> queryAllShardsParallel(String sql, Object... params) {
+        return shards.parallelStream()
+            .flatMap(shard -> {
+                try {
+                    return queryOnShard(shard, sql, params).stream();
+                } catch (SQLException e) {
+                    throw new RuntimeException("Shard query failed", e);
+                }
+            })
+            .collect(Collectors.toList());
+    }
+    
+    private List<User> queryOnShard(DataSource shard, String sql, Object[] params) 
+            throws SQLException {
+        List<User> results = new ArrayList<>();
+        
+        try (Connection conn = shard.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            
+            for (int i = 0; i < params.length; i++) {
+                stmt.setObject(i + 1, params[i]);
+            }
+            
+            ResultSet rs = stmt.executeQuery();
+            while (rs.next()) {
+                results.add(mapToUser(rs));
+            }
+        }
+        
+        return results;
+    }
+    
+    private User mapToUser(ResultSet rs) throws SQLException {
+        return new User(
+            UUID.fromString(rs.getString("id")),
+            rs.getString("name"),
+            rs.getString("email")
+        );
+    }
+}
 ```
 
 **Challenges**:
@@ -3417,21 +4550,41 @@ Database 4: Analytics Service (events, metrics)
 
 **Federation Implementation**:
 
-```python
-# Each service has its own database
-class UserService:
-    def __init__(self):
-        self.db = connect("user_db")
+```java
+/**
+ * Each microservice has its own dedicated database.
+ * Services communicate via APIs, not direct DB joins.
+ */
+@Service
+public class UserService {
     
-    def get_user(self, user_id):
-        return self.db.query("SELECT * FROM users WHERE id = ?", user_id)
+    private final JdbcTemplate db;
+    
+    public UserService(@Qualifier("userDataSource") DataSource dataSource) {
+        this.db = new JdbcTemplate(dataSource);
+    }
+    
+    public Optional<User> getUser(Long userId) {
+        String sql = "SELECT * FROM users WHERE id = ?";
+        List<User> users = db.query(sql, new UserRowMapper(), userId);
+        return users.isEmpty() ? Optional.empty() : Optional.of(users.get(0));
+    }
+}
 
-class OrderService:
-    def __init__(self):
-        self.db = connect("order_db")
+@Service
+public class OrderService {
     
-    def get_orders(self, user_id):
-        return self.db.query("SELECT * FROM orders WHERE user_id = ?", user_id)
+    private final JdbcTemplate db;
+    
+    public OrderService(@Qualifier("orderDataSource") DataSource dataSource) {
+        this.db = new JdbcTemplate(dataSource);
+    }
+    
+    public List<Order> getOrders(Long userId) {
+        String sql = "SELECT * FROM orders WHERE user_id = ?";
+        return db.query(sql, new OrderRowMapper(), userId);
+    }
+}
 ```
 
 **Pros**:
@@ -3472,12 +4625,16 @@ Shard 3: Master + 2 Slaves
 **Federation Availability**:
 - **Problem**: Service failure = feature unavailable
 - **Solution**: Circuit breaker, graceful degradation
-```python
-try:
-    orders = order_service.get_orders(user_id)
-except ServiceUnavailable:
-    orders = []  # Graceful degradation
-    log_error("Order service down")
+```java
+// Graceful degradation with circuit breaker pattern
+public List<Order> getOrdersWithFallback(UUID userId) {
+    try {
+        return orderService.getOrders(userId);
+    } catch (ServiceUnavailableException e) {
+        logger.error("Order service down", e);
+        return Collections.emptyList();  // Graceful degradation
+    }
+}
 ```
 
 ### When to Use Each
@@ -3503,26 +4660,68 @@ except ServiceUnavailable:
 **1. Cache-Aside (Lazy Loading)**
 
 **Pattern**:
-```python
-def get_user(user_id):
-    # Try cache first
-    user = cache.get(f"user:{user_id}")
-    if user:
-        return user
+```java
+/**
+ * Cache-aside pattern implementation.
+ * Application manages cache population explicitly.
+ */
+@Service
+public class UserCacheAsideService {
     
-    # Cache miss - query DB
-    user = db.query("SELECT * FROM users WHERE id = ?", user_id)
+    private final RedisTemplate<String, User> cache;
+    private final UserRepository userRepository;
     
-    # Populate cache
-    cache.set(f"user:{user_id}", user, ttl=3600)
-    return user
-
-def update_user(user_id, data):
-    # Update DB
-    db.update("UPDATE users SET ... WHERE id = ?", user_id)
+    private static final Duration CACHE_TTL = Duration.ofHours(1);
     
-    # Invalidate cache
-    cache.delete(f"user:{user_id}")
+    public UserCacheAsideService(RedisTemplate<String, User> cache,
+                                  UserRepository userRepository) {
+        this.cache = cache;
+        this.userRepository = userRepository;
+    }
+    
+    /**
+     * Get user with cache-aside pattern.
+     * Check cache first, load from DB on miss.
+     */
+    public Optional<User> getUser(UUID userId) {
+        String cacheKey = "user:" + userId;
+        
+        // Try cache first
+        User cachedUser = cache.opsForValue().get(cacheKey);
+        if (cachedUser != null) {
+            return Optional.of(cachedUser);
+        }
+        
+        // Cache miss - query database
+        Optional<User> userOpt = userRepository.findById(userId);
+        
+        // Populate cache for future requests
+        userOpt.ifPresent(user -> 
+            cache.opsForValue().set(cacheKey, user, CACHE_TTL));
+        
+        return userOpt;
+    }
+    
+    /**
+     * Update user and invalidate cache.
+     */
+    @Transactional
+    public User updateUser(UUID userId, UserUpdateRequest request) {
+        // Update database
+        User user = userRepository.findById(userId)
+            .orElseThrow(() -> new UserNotFoundException(userId));
+        
+        user.setName(request.getName());
+        user.setEmail(request.getEmail());
+        user = userRepository.save(user);
+        
+        // Invalidate cache - next read will reload from DB
+        String cacheKey = "user:" + userId;
+        cache.delete(cacheKey);
+        
+        return user;
+    }
+}
 ```
 
 **Pros**: Only caches requested data, cache resilience
@@ -3531,15 +4730,41 @@ def update_user(user_id, data):
 **2. Write-Through Cache**
 
 **Pattern**:
-```python
-def update_user(user_id, data):
-    # Write to cache
-    cache.set(f"user:{user_id}", data, ttl=3600)
+```java
+/**
+ * Write-through cache pattern.
+ * Cache is updated synchronously with database writes.
+ */
+@Service
+public class UserWriteThroughService {
     
-    # Write to DB (synchronously)
-    db.update("UPDATE users SET ... WHERE id = ?", user_id)
+    private final RedisTemplate<String, User> cache;
+    private final UserRepository userRepository;
     
-    return data
+    private static final Duration CACHE_TTL = Duration.ofHours(1);
+    
+    /**
+     * Update user with write-through pattern.
+     * Both cache and DB are updated in the same operation.
+     */
+    @Transactional
+    public User updateUser(UUID userId, UserUpdateRequest request) {
+        User user = userRepository.findById(userId)
+            .orElseThrow(() -> new UserNotFoundException(userId));
+        
+        user.setName(request.getName());
+        user.setEmail(request.getEmail());
+        
+        // Write to cache first
+        String cacheKey = "user:" + userId;
+        cache.opsForValue().set(cacheKey, user, CACHE_TTL);
+        
+        // Write to database (synchronously)
+        user = userRepository.save(user);
+        
+        return user;
+    }
+}
 ```
 
 **Pros**: Cache always consistent with DB
@@ -3548,25 +4773,66 @@ def update_user(user_id, data):
 **3. Write-Behind (Write-Back) Cache**
 
 **Pattern**:
-```python
-def update_user(user_id, data):
-    # Write to cache immediately
-    cache.set(f"user:{user_id}", data, ttl=3600)
+```java
+/**
+ * Write-behind cache pattern.
+ * Writes go to cache immediately, DB is updated asynchronously.
+ */
+@Service
+public class UserWriteBehindService {
     
-    # Queue DB write (asynchronously)
-    queue.enqueue('db_writes', {
-        'table': 'users',
-        'id': user_id,
-        'data': data
-    })
+    private final RedisTemplate<String, User> cache;
+    private final KafkaTemplate<String, UserWriteEvent> writeQueue;
     
-    return data  # Fast response
+    private static final Duration CACHE_TTL = Duration.ofHours(1);
+    
+    /**
+     * Update user with write-behind pattern.
+     * Fast response - DB write is queued for async processing.
+     */
+    public User updateUser(UUID userId, UserUpdateRequest request) {
+        User user = new User(userId, request.getName(), request.getEmail());
+        
+        // Write to cache immediately
+        String cacheKey = "user:" + userId;
+        cache.opsForValue().set(cacheKey, user, CACHE_TTL);
+        
+        // Queue DB write asynchronously
+        UserWriteEvent event = new UserWriteEvent(
+            "users",
+            userId,
+            user,
+            Instant.now()
+        );
+        writeQueue.send("db-writes", userId.toString(), event);
+        
+        return user; // Fast response
+    }
+}
 
-# Background worker
-def process_db_writes():
-    while True:
-        write = queue.dequeue('db_writes')
-        db.update(...)
+/**
+ * Background worker processing queued DB writes.
+ */
+@Component
+public class DatabaseWriteWorker {
+    
+    private final UserRepository userRepository;
+    
+    @KafkaListener(topics = "db-writes", groupId = "db-write-worker")
+    public void processWrite(UserWriteEvent event) {
+        userRepository.save(event.getUser());
+    }
+}
+
+/**
+ * Event for queued database writes.
+ */
+public record UserWriteEvent(
+    String table,
+    UUID id,
+    User user,
+    Instant timestamp
+) {}
 ```
 
 **Pros**: Fast writes, batching possible
@@ -3575,13 +4841,36 @@ def process_db_writes():
 **4. Read-Through Cache**
 
 **Pattern**:
-```python
-# Cache layer handles DB queries automatically
-user = cache.get_with_loader(
-    key=f"user:{user_id}",
-    loader=lambda: db.query("SELECT * FROM users WHERE id = ?", user_id),
-    ttl=3600
-)
+```java
+/**
+ * Read-through cache using Spring's @Cacheable annotation.
+ * Cache layer handles DB queries automatically.
+ */
+@Service
+public class UserReadThroughService {
+    
+    private final UserRepository userRepository;
+    
+    /**
+     * Get user with read-through pattern.
+     * Spring Cache abstraction handles cache management.
+     */
+    @Cacheable(value = "users", key = "#userId", unless = "#result == null")
+    public User getUser(UUID userId) {
+        return userRepository.findById(userId)
+            .orElse(null);
+    }
+    
+    @CacheEvict(value = "users", key = "#userId")
+    public void evictUser(UUID userId) {
+        // Cache entry will be evicted
+    }
+    
+    @CachePut(value = "users", key = "#user.id")
+    public User updateUser(User user) {
+        return userRepository.save(user);
+    }
+}
 ```
 
 **Pros**: Simplified application code
@@ -3590,57 +4879,149 @@ user = cache.get_with_loader(
 ### Cache Eviction Policies
 
 **1. LRU (Least Recently Used)**
-```python
-class LRUCache:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.cache = OrderedDict()
+```java
+import java.util.*;
+
+/**
+ * Thread-safe LRU Cache implementation using LinkedHashMap.
+ * Evicts least recently accessed entries when capacity is reached.
+ */
+public class LRUCache<K, V> {
     
-    def get(self, key):
-        if key not in self.cache:
-            return None
-        # Move to end (most recent)
-        self.cache.move_to_end(key)
-        return self.cache[key]
+    private final int capacity;
+    private final Map<K, V> cache;
     
-    def put(self, key, value):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        if len(self.cache) > self.capacity:
-            # Evict least recently used (first item)
-            self.cache.popitem(last=False)
+    public LRUCache(int capacity) {
+        this.capacity = capacity;
+        // LinkedHashMap with access-order (true) maintains LRU order
+        this.cache = Collections.synchronizedMap(
+            new LinkedHashMap<K, V>(capacity, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+                    return size() > LRUCache.this.capacity;
+                }
+            });
+    }
+    
+    public V get(K key) {
+        return cache.get(key); // Access updates recency in LinkedHashMap
+    }
+    
+    public void put(K key, V value) {
+        cache.put(key, value);
+        // Eldest entry auto-removed if over capacity
+    }
+    
+    public void remove(K key) {
+        cache.remove(key);
+    }
+    
+    public int size() {
+        return cache.size();
+    }
+    
+    public void clear() {
+        cache.clear();
+    }
+}
 ```
 
 **2. LFU (Least Frequently Used)**
-```python
-class LFUCache:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.cache = {}  # key -> (value, frequency)
-        self.freq_map = defaultdict(list)  # frequency -> [keys]
-        self.min_freq = 0
+```java
+import java.util.*;
+
+/**
+ * LFU Cache implementation with O(1) get and put operations.
+ * Evicts least frequently used entries; ties broken by recency.
+ */
+public class LFUCache<K, V> {
     
-    def get(self, key):
-        if key not in self.cache:
-            return None
-        value, freq = self.cache[key]
-        # Increment frequency
-        self.cache[key] = (value, freq + 1)
-        self.freq_map[freq].remove(key)
-        self.freq_map[freq + 1].append(key)
-        return value
+    private final int capacity;
+    private int minFrequency;
     
-    def put(self, key, value):
-        if len(self.cache) >= self.capacity:
-            # Evict least frequently used
-            evict_key = self.freq_map[self.min_freq][0]
-            del self.cache[evict_key]
-            self.freq_map[self.min_freq].remove(evict_key)
+    // Key -> (Value, Frequency)
+    private final Map<K, CacheEntry<V>> cache;
+    
+    // Frequency -> LinkedHashSet of keys (preserves insertion order)
+    private final Map<Integer, LinkedHashSet<K>> frequencyMap;
+    
+    public LFUCache(int capacity) {
+        this.capacity = capacity;
+        this.minFrequency = 0;
+        this.cache = new HashMap<>();
+        this.frequencyMap = new HashMap<>();
+    }
+    
+    public V get(K key) {
+        if (!cache.containsKey(key)) {
+            return null;
+        }
         
-        self.cache[key] = (value, 1)
-        self.freq_map[1].append(key)
-        self.min_freq = 1
+        CacheEntry<V> entry = cache.get(key);
+        updateFrequency(key, entry);
+        return entry.value;
+    }
+    
+    public void put(K key, V value) {
+        if (capacity <= 0) return;
+        
+        if (cache.containsKey(key)) {
+            CacheEntry<V> entry = cache.get(key);
+            entry.value = value;
+            updateFrequency(key, entry);
+            return;
+        }
+        
+        // Evict if at capacity
+        if (cache.size() >= capacity) {
+            evictLeastFrequent();
+        }
+        
+        // Add new entry with frequency 1
+        CacheEntry<V> newEntry = new CacheEntry<>(value, 1);
+        cache.put(key, newEntry);
+        frequencyMap.computeIfAbsent(1, k -> new LinkedHashSet<>()).add(key);
+        minFrequency = 1;
+    }
+    
+    private void updateFrequency(K key, CacheEntry<V> entry) {
+        int oldFreq = entry.frequency;
+        int newFreq = oldFreq + 1;
+        
+        // Remove from old frequency bucket
+        LinkedHashSet<K> oldBucket = frequencyMap.get(oldFreq);
+        oldBucket.remove(key);
+        
+        // Update min frequency if bucket is now empty
+        if (oldBucket.isEmpty() && minFrequency == oldFreq) {
+            minFrequency = newFreq;
+        }
+        
+        // Add to new frequency bucket
+        frequencyMap.computeIfAbsent(newFreq, k -> new LinkedHashSet<>()).add(key);
+        entry.frequency = newFreq;
+    }
+    
+    private void evictLeastFrequent() {
+        LinkedHashSet<K> minFreqBucket = frequencyMap.get(minFrequency);
+        if (minFreqBucket != null && !minFreqBucket.isEmpty()) {
+            // Remove first (oldest) entry at minimum frequency
+            K evictKey = minFreqBucket.iterator().next();
+            minFreqBucket.remove(evictKey);
+            cache.remove(evictKey);
+        }
+    }
+    
+    private static class CacheEntry<V> {
+        V value;
+        int frequency;
+        
+        CacheEntry(V value, int frequency) {
+            this.value = value;
+            this.frequency = frequency;
+        }
+    }
+}
 ```
 
 **3. FIFO (First In First Out)**
@@ -3648,100 +5029,227 @@ class LFUCache:
 - Doesn't consider access patterns
 
 **4. TTL (Time To Live)**
-```python
-cache.set(key, value, ttl=3600)  # Expire after 1 hour
+```java
+// Expire after 1 hour
+cache.set(key, value, Duration.ofHours(1));
 ```
 
 ### Advanced Caching Techniques
 
 **1. Bloom Filters (Negative Cache)**
-```python
-# Avoid querying DB for non-existent keys
-bloom = BloomFilter(size=1000000, hash_functions=3)
+```java
+import com.google.common.hash.BloomFilter;
+import com.google.common.hash.Funnels;
 
-def get_user(user_id):
-    # Check bloom filter first
-    if not bloom.might_contain(user_id):
-        return None  # Definitely doesn't exist
+/**
+ * Bloom filter for avoiding unnecessary DB queries.
+ * False positives possible, but no false negatives.
+ */
+public class UserCacheWithBloomFilter {
     
-    # Might exist - check cache/DB
-    return cache_aside_get(user_id)
-
-def create_user(user_id, data):
-    db.insert(...)
-    bloom.add(user_id)
+    // Bloom filter with 1M expected insertions and 1% false positive rate
+    private final BloomFilter<String> bloomFilter = 
+        BloomFilter.create(Funnels.stringFunnel(StandardCharsets.UTF_8), 
+                          1_000_000, 0.01);
+    
+    private final Cache<String, User> cache;
+    private final UserRepository db;
+    
+    public Optional<User> getUser(String userId) {
+        // Check bloom filter first - O(1) operation
+        if (!bloomFilter.mightContain(userId)) {
+            return Optional.empty();  // Definitely doesn't exist
+        }
+        
+        // Might exist - check cache then DB
+        return cacheAsideGet(userId);
+    }
+    
+    public User createUser(String userId, UserData data) {
+        User user = db.insert(userId, data);
+        bloomFilter.put(userId);  // Add to bloom filter
+        return user;
+    }
+}
 ```
 
 **2. Probabilistic Early Expiration (Thundering Herd Prevention)**
-```python
-import random
+```java
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
-def get_with_early_expiration(key, loader, ttl):
-    value, expiry = cache.get_with_ttl(key)
+/**
+ * Cache with probabilistic early expiration to prevent thundering herd.
+ * As expiry approaches, probability of refresh increases.
+ */
+public class ProbabilisticCache<K, V> {
     
-    if value is None:
-        # Cache miss - load data
-        value = loader()
-        cache.set(key, value, ttl=ttl)
-        return value
+    private final Cache<K, CacheEntry<V>> cache;
+    private final Random random = new Random();
     
-    # Calculate time to expiry
-    remaining = expiry - time.time()
+    public V getWithEarlyExpiration(K key, Supplier<V> loader, Duration ttl) {
+        CacheEntry<V> entry = cache.get(key);
+        
+        if (entry == null) {
+            // Cache miss - load data
+            V value = loader.get();
+            cache.set(key, new CacheEntry<>(value, Instant.now().plus(ttl)), ttl);
+            return value;
+        }
+        
+        // Calculate time remaining until expiry
+        long remainingMs = Duration.between(Instant.now(), entry.expiry).toMillis();
+        long ttlMs = ttl.toMillis();
+        
+        // Probability increases as expiry approaches
+        // At half TTL: 50% chance, near expiry: ~100% chance
+        double probability = 1.0 - ((double) remainingMs / ttlMs);
+        
+        if (random.nextDouble() < probability) {
+            // Async refresh to avoid blocking
+            CompletableFuture.runAsync(() -> {
+                V freshValue = loader.get();
+                cache.set(key, new CacheEntry<>(freshValue, Instant.now().plus(ttl)), ttl);
+            });
+        }
+        
+        return entry.value;
+    }
     
-    # Probabilistic early refresh
-    # Higher probability as expiry approaches
-    probability = 1 - (remaining / ttl)
-    if random.random() < probability:
-        # Async refresh
-        async_refresh(key, loader, ttl)
-    
-    return value
+    private record CacheEntry<V>(V value, Instant expiry) {}
+}
 ```
 
 **3. Consistent Hashing for Cache Distribution**
-```python
-class ConsistentHashRing:
-    def __init__(self, nodes, virtual_nodes=150):
-        self.ring = {}
-        for node in nodes:
-            for i in range(virtual_nodes):
-                hash_key = hashlib.md5(f"{node}:{i}".encode()).digest()
-                self.ring[hash_key] = node
-        self.sorted_keys = sorted(self.ring.keys())
+```java
+import java.security.MessageDigest;
+import java.util.*;
+
+/**
+ * Consistent hash ring for distributing cache keys across nodes.
+ * Minimizes cache invalidation when nodes are added/removed.
+ */
+public class ConsistentHashCacheRouter {
     
-    def get_node(self, key):
-        if not self.ring:
-            return None
-        hash_key = hashlib.md5(key.encode()).digest()
-        for ring_key in self.sorted_keys:
-            if hash_key <= ring_key:
-                return self.ring[ring_key]
-        return self.ring[self.sorted_keys[0]]
+    private final TreeMap<String, String> ring = new TreeMap<>();
+    private final int virtualNodes;
+    
+    public ConsistentHashCacheRouter(List<String> nodes, int virtualNodes) {
+        this.virtualNodes = virtualNodes;
+        for (String node : nodes) {
+            addNode(node);
+        }
+    }
+    
+    public void addNode(String node) {
+        for (int i = 0; i < virtualNodes; i++) {
+            String hash = computeMD5Hash(node + ":" + i);
+            ring.put(hash, node);
+        }
+    }
+    
+    public void removeNode(String node) {
+        for (int i = 0; i < virtualNodes; i++) {
+            String hash = computeMD5Hash(node + ":" + i);
+            ring.remove(hash);
+        }
+    }
+    
+    public String getNodeForKey(String key) {
+        if (ring.isEmpty()) {
+            return null;
+        }
+        
+        String hash = computeMD5Hash(key);
+        Map.Entry<String, String> entry = ring.ceilingEntry(hash);
+        
+        // Wrap around to first node
+        return (entry != null) ? entry.getValue() : ring.firstEntry().getValue();
+    }
+    
+    private String computeMD5Hash(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes());
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("MD5 computation failed", e);
+        }
+    }
+}
 
-# Usage
-cache_nodes = ["cache1:6379", "cache2:6379", "cache3:6379"]
-ring = ConsistentHashRing(cache_nodes)
+// Usage example
+List<String> cacheNodes = List.of("cache1:6379", "cache2:6379", "cache3:6379");
+ConsistentHashCacheRouter router = new ConsistentHashCacheRouter(cacheNodes, 150);
 
-def cache_get(key):
-    node = ring.get_node(key)
-    return redis.connect(node).get(key)
+public String cacheGet(String key) {
+    String node = router.getNodeForKey(key);
+    return redisClients.get(node).get(key);
+}
 ```
 
 ### Monitoring Cache Performance
 
 **Key Metrics**:
-```python
-cache_hit_rate = cache_hits / (cache_hits + cache_misses)
-# Target: > 80% for most applications
-
-cache_eviction_rate = evictions / total_operations
-# High rate indicates cache too small
-
-average_ttl_hit_rate = hits_before_expiry / total_sets
-# Low rate indicates TTL too short
-
-memory_utilization = used_memory / max_memory
-# Target: 70-80% (headroom for spikes)
+```java
+/**
+ * Cache performance monitoring and metrics calculation.
+ */
+public class CacheMetrics {
+    
+    private final AtomicLong cacheHits = new AtomicLong(0);
+    private final AtomicLong cacheMisses = new AtomicLong(0);
+    private final AtomicLong evictions = new AtomicLong(0);
+    private final AtomicLong totalSets = new AtomicLong(0);
+    private final AtomicLong hitsBeforeExpiry = new AtomicLong(0);
+    
+    /**
+     * Calculate cache hit rate.
+     * Target: > 80% for most applications
+     */
+    public double getCacheHitRate() {
+        long total = cacheHits.get() + cacheMisses.get();
+        return total > 0 ? (double) cacheHits.get() / total : 0.0;
+    }
+    
+    /**
+     * Calculate eviction rate.
+     * High rate indicates cache is too small
+     */
+    public double getEvictionRate() {
+        long totalOps = cacheHits.get() + cacheMisses.get();
+        return totalOps > 0 ? (double) evictions.get() / totalOps : 0.0;
+    }
+    
+    /**
+     * Calculate TTL effectiveness.
+     * Low rate indicates TTL is too short
+     */
+    public double getTtlHitRate() {
+        long sets = totalSets.get();
+        return sets > 0 ? (double) hitsBeforeExpiry.get() / sets : 0.0;
+    }
+    
+    /**
+     * Calculate memory utilization.
+     * Target: 70-80% (leave headroom for spikes)
+     */
+    public double getMemoryUtilization(long usedMemory, long maxMemory) {
+        return maxMemory > 0 ? (double) usedMemory / maxMemory : 0.0;
+    }
+    
+    // Increment methods for tracking
+    public void recordHit() { cacheHits.incrementAndGet(); }
+    public void recordMiss() { cacheMisses.incrementAndGet(); }
+    public void recordEviction() { evictions.incrementAndGet(); }
+    public void recordSet() { totalSets.incrementAndGet(); }
+    public void recordHitBeforeExpiry() { hitsBeforeExpiry.incrementAndGet(); }
+}
 ```
 
 ---
@@ -3758,108 +5266,251 @@ memory_utilization = used_memory / max_memory
 
 **Implementation**:
 
-```python
-from abc import ABC, abstractmethod
-import csv
-import json
-import xml.etree.ElementTree as ET
+```java
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import com.fasterxml.jackson.databind.*;
+import com.fasterxml.jackson.dataformat.xml.*;
 
-class FileAdapter(ABC):
-    @abstractmethod
-    def read(self, filepath):
-        pass
+/**
+ * Abstract base class for file format adapters.
+ * Enables reading/writing different file formats through a common interface.
+ */
+public abstract class FileAdapter<T> {
     
-    @abstractmethod
-    def write(self, filepath, data):
-        pass
+    public abstract List<T> read(Path filePath, Class<T> type) throws IOException;
+    
+    public abstract void write(Path filePath, List<T> data) throws IOException;
+}
 
-class CSVAdapter(FileAdapter):
-    def read(self, filepath):
-        with open(filepath, 'r') as file:
-            reader = csv.DictReader(file)
-            return list(reader)
+/**
+ * CSV file adapter using Jackson CSV.
+ */
+public class CSVAdapter<T> extends FileAdapter<T> {
     
-    def write(self, filepath, data):
-        if not data:
-            return
-        with open(filepath, 'w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=data[0].keys())
-            writer.writeheader()
-            writer.writerows(data)
-
-class JSONAdapter(FileAdapter):
-    def read(self, filepath):
-        with open(filepath, 'r') as file:
-            return json.load(file)
+    private final CsvMapper csvMapper;
     
-    def write(self, filepath, data):
-        with open(filepath, 'w') as file:
-            json.dump(data, file, indent=2)
-
-class XMLAdapter(FileAdapter):
-    def read(self, filepath):
-        tree = ET.parse(filepath)
-        root = tree.getroot()
-        # Convert XML to dict (simplified)
-        return self._xml_to_dict(root)
+    public CSVAdapter() {
+        this.csvMapper = new CsvMapper();
+    }
     
-    def write(self, filepath, data):
-        root = self._dict_to_xml(data)
-        tree = ET.ElementTree(root)
-        tree.write(filepath)
-    
-    def _xml_to_dict(self, element):
-        # Implementation details...
-        pass
-
-# Factory pattern for adapter selection
-class FileAdapterFactory:
-    @staticmethod
-    def get_adapter(file_type):
-        adapters = {
-            'csv': CSVAdapter(),
-            'json': JSONAdapter(),
-            'xml': XMLAdapter()
+    @Override
+    public List<T> read(Path filePath, Class<T> type) throws IOException {
+        CsvSchema schema = csvMapper.schemaFor(type).withHeader();
+        
+        try (Reader reader = Files.newBufferedReader(filePath)) {
+            MappingIterator<T> iterator = csvMapper
+                .readerFor(type)
+                .with(schema)
+                .readValues(reader);
+            return iterator.readAll();
         }
-        return adapters.get(file_type.lower())
+    }
+    
+    @Override
+    public void write(Path filePath, List<T> data) throws IOException {
+        if (data == null || data.isEmpty()) {
+            return;
+        }
+        
+        CsvSchema schema = csvMapper.schemaFor(data.get(0).getClass()).withHeader();
+        
+        try (Writer writer = Files.newBufferedWriter(filePath)) {
+            csvMapper.writer(schema).writeValues(writer).writeAll(data);
+        }
+    }
+}
 
-# Usage
-adapter = FileAdapterFactory.get_adapter('csv')
-data = adapter.read('data.csv')
-processed_data = process(data)
-adapter.write('output.csv', processed_data)
+/**
+ * JSON file adapter using Jackson.
+ */
+public class JSONAdapter<T> extends FileAdapter<T> {
+    
+    private final ObjectMapper objectMapper;
+    
+    public JSONAdapter() {
+        this.objectMapper = new ObjectMapper()
+            .enable(SerializationFeature.INDENT_OUTPUT);
+    }
+    
+    @Override
+    public List<T> read(Path filePath, Class<T> type) throws IOException {
+        JavaType listType = objectMapper.getTypeFactory()
+            .constructCollectionType(List.class, type);
+        return objectMapper.readValue(filePath.toFile(), listType);
+    }
+    
+    @Override
+    public void write(Path filePath, List<T> data) throws IOException {
+        objectMapper.writeValue(filePath.toFile(), data);
+    }
+}
+
+/**
+ * XML file adapter using Jackson XML.
+ */
+public class XMLAdapter<T> extends FileAdapter<T> {
+    
+    private final XmlMapper xmlMapper;
+    
+    public XMLAdapter() {
+        this.xmlMapper = new XmlMapper();
+    }
+    
+    @Override
+    public List<T> read(Path filePath, Class<T> type) throws IOException {
+        JavaType listType = xmlMapper.getTypeFactory()
+            .constructCollectionType(List.class, type);
+        return xmlMapper.readValue(filePath.toFile(), listType);
+    }
+    
+    @Override
+    public void write(Path filePath, List<T> data) throws IOException {
+        xmlMapper.writeValue(filePath.toFile(), data);
+    }
+}
+
+/**
+ * Factory for creating appropriate file adapter based on file type.
+ */
+public class FileAdapterFactory {
+    
+    private static final Map<String, FileAdapter<?>> adapters = new HashMap<>();
+    
+    static {
+        adapters.put("csv", new CSVAdapter<>());
+        adapters.put("json", new JSONAdapter<>());
+        adapters.put("xml", new XMLAdapter<>());
+    }
+    
+    @SuppressWarnings("unchecked")
+    public static <T> FileAdapter<T> getAdapter(String fileType) {
+        FileAdapter<?> adapter = adapters.get(fileType.toLowerCase());
+        if (adapter == null) {
+            throw new IllegalArgumentException("Unsupported file type: " + fileType);
+        }
+        return (FileAdapter<T>) adapter;
+    }
+    
+    public static <T> FileAdapter<T> getAdapterForFile(Path filePath) {
+        String fileName = filePath.getFileName().toString();
+        String extension = fileName.substring(fileName.lastIndexOf('.') + 1);
+        return getAdapter(extension);
+    }
+}
+
+// Usage example
+// FileAdapter<User> adapter = FileAdapterFactory.getAdapter("csv");
+// List<User> users = adapter.read(Path.of("data.csv"), User.class);
+// adapter.write(Path.of("output.csv"), processedUsers);
 ```
 
 **Advanced File Adapter** (Streaming for Large Files):
 
-```python
-class StreamingCSVAdapter:
-    def read_stream(self, filepath, chunk_size=1000):
-        with open(filepath, 'r') as file:
-            reader = csv.DictReader(file)
-            chunk = []
-            for row in reader:
-                chunk.append(row)
-                if len(chunk) >= chunk_size:
-                    yield chunk
-                    chunk = []
-            if chunk:
-                yield chunk
-    
-    def write_stream(self, filepath, data_generator):
-        first_chunk = next(data_generator)
-        with open(filepath, 'w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=first_chunk[0].keys())
-            writer.writeheader()
-            writer.writerows(first_chunk)
-            
-            for chunk in data_generator:
-                writer.writerows(chunk)
+```java
+import java.util.*;
+import java.util.function.Consumer;
+import java.io.*;
+import java.nio.file.*;
 
-# Usage for large files
-adapter = StreamingCSVAdapter()
-for chunk in adapter.read_stream('large_file.csv', chunk_size=10000):
-    process_chunk(chunk)
+/**
+ * Streaming CSV adapter for processing large files without loading
+ * everything into memory.
+ */
+public class StreamingCSVAdapter<T> {
+    
+    private final CsvMapper csvMapper;
+    private final Class<T> type;
+    
+    public StreamingCSVAdapter(Class<T> type) {
+        this.csvMapper = new CsvMapper();
+        this.type = type;
+    }
+    
+    /**
+     * Read file in chunks for memory-efficient processing.
+     * 
+     * @param filePath Path to the CSV file
+     * @param chunkSize Number of records per chunk
+     * @return Iterator of chunks
+     */
+    public Iterator<List<T>> readInChunks(Path filePath, int chunkSize) 
+            throws IOException {
+        
+        CsvSchema schema = csvMapper.schemaFor(type).withHeader();
+        Reader reader = Files.newBufferedReader(filePath);
+        MappingIterator<T> iterator = csvMapper
+            .readerFor(type)
+            .with(schema)
+            .readValues(reader);
+        
+        return new Iterator<>() {
+            @Override
+            public boolean hasNext() {
+                return iterator.hasNext();
+            }
+            
+            @Override
+            public List<T> next() {
+                List<T> chunk = new ArrayList<>(chunkSize);
+                while (iterator.hasNext() && chunk.size() < chunkSize) {
+                    chunk.add(iterator.next());
+                }
+                return chunk;
+            }
+        };
+    }
+    
+    /**
+     * Process file in streaming fashion with a consumer function.
+     */
+    public void processStream(Path filePath, int chunkSize, 
+                              Consumer<List<T>> chunkProcessor) throws IOException {
+        Iterator<List<T>> chunks = readInChunks(filePath, chunkSize);
+        while (chunks.hasNext()) {
+            chunkProcessor.accept(chunks.next());
+        }
+    }
+    
+    /**
+     * Write data from a stream/generator to file without buffering all data.
+     */
+    public void writeStream(Path filePath, Iterator<List<T>> dataIterator) 
+            throws IOException {
+        
+        if (!dataIterator.hasNext()) {
+            return;
+        }
+        
+        List<T> firstChunk = dataIterator.next();
+        CsvSchema schema = csvMapper.schemaFor(type).withHeader();
+        
+        try (Writer writer = Files.newBufferedWriter(filePath)) {
+            SequenceWriter seqWriter = csvMapper.writer(schema).writeValues(writer);
+            
+            // Write first chunk
+            for (T item : firstChunk) {
+                seqWriter.write(item);
+            }
+            
+            // Write remaining chunks
+            while (dataIterator.hasNext()) {
+                for (T item : dataIterator.next()) {
+                    seqWriter.write(item);
+                }
+            }
+        }
+    }
+}
+
+// Usage for large files
+// StreamingCSVAdapter<User> adapter = new StreamingCSVAdapter<>(User.class);
+// adapter.processStream(
+//     Path.of("large_file.csv"), 
+//     10000, 
+//     chunk -> processChunk(chunk)
+// );
 ```
 
 ### FTP Adapter
@@ -3868,238 +5519,358 @@ for chunk in adapter.read_stream('large_file.csv', chunk_size=10000):
 
 **Implementation**:
 
-```python
-from ftplib import FTP, FTP_TLS
-import os
+```java
+import org.apache.commons.net.ftp.FTP;
+import org.apache.commons.net.ftp.FTPClient;
+import org.apache.commons.net.ftp.FTPSClient;
+import java.io.*;
+import java.nio.file.*;
 
-class FTPAdapter:
-    def __init__(self, host, username, password, port=21, use_tls=False):
-        self.host = host
-        self.username = username
-        self.password = password
-        self.port = port
-        self.use_tls = use_tls
-        self.ftp = None
+/**
+ * FTP adapter for file transfers with optional TLS support.
+ * Implements AutoCloseable for try-with-resources usage.
+ */
+public class FTPAdapter implements AutoCloseable {
     
-    def connect(self):
-        if self.use_tls:
-            self.ftp = FTP_TLS()
-        else:
-            self.ftp = FTP()
+    private final String host;
+    private final String username;
+    private final String password;
+    private final int port;
+    private final boolean useTls;
+    private FTPClient ftpClient;
+    
+    public FTPAdapter(String host, String username, String password, 
+                      int port, boolean useTls) {
+        this.host = host;
+        this.username = username;
+        this.password = password;
+        this.port = port;
+        this.useTls = useTls;
+    }
+    
+    public FTPAdapter connect() throws IOException {
+        ftpClient = useTls ? new FTPSClient() : new FTPClient();
+        ftpClient.connect(host, port);
+        ftpClient.login(username, password);
+        ftpClient.enterLocalPassiveMode();
+        ftpClient.setFileType(FTP.BINARY_FILE_TYPE);
         
-        self.ftp.connect(self.host, self.port)
-        self.ftp.login(self.username, self.password)
-        
-        if self.use_tls:
-            self.ftp.prot_p()  # Set up secure data connection
-        
-        return self
+        if (useTls) {
+            ((FTPSClient) ftpClient).execPBSZ(0);
+            ((FTPSClient) ftpClient).execPROT("P");
+        }
+        return this;
+    }
     
-    def disconnect(self):
-        if self.ftp:
-            self.ftp.quit()
+    public void disconnect() {
+        if (ftpClient != null && ftpClient.isConnected()) {
+            try {
+                ftpClient.logout();
+                ftpClient.disconnect();
+            } catch (IOException e) {
+                // Log and ignore
+            }
+        }
+    }
     
-    def upload(self, local_path, remote_path):
-        with open(local_path, 'rb') as file:
-            self.ftp.storbinary(f'STOR {remote_path}', file)
+    public void upload(Path localPath, String remotePath) throws IOException {
+        try (InputStream input = Files.newInputStream(localPath)) {
+            boolean success = ftpClient.storeFile(remotePath, input);
+            if (!success) {
+                throw new IOException("FTP upload failed: " + ftpClient.getReplyString());
+            }
+        }
+    }
     
-    def download(self, remote_path, local_path):
-        with open(local_path, 'wb') as file:
-            self.ftp.retrbinary(f'RETR {remote_path}', file.write)
+    public void download(String remotePath, Path localPath) throws IOException {
+        try (OutputStream output = Files.newOutputStream(localPath)) {
+            boolean success = ftpClient.retrieveFile(remotePath, output);
+            if (!success) {
+                throw new IOException("FTP download failed: " + ftpClient.getReplyString());
+            }
+        }
+    }
     
-    def list_files(self, remote_dir='/'):
-        self.ftp.cwd(remote_dir)
-        return self.ftp.nlst()
+    public String[] listFiles(String remoteDir) throws IOException {
+        return ftpClient.listNames(remoteDir);
+    }
     
-    def delete(self, remote_path):
-        self.ftp.delete(remote_path)
+    public void delete(String remotePath) throws IOException {
+        ftpClient.deleteFile(remotePath);
+    }
     
-    def create_directory(self, remote_dir):
-        self.ftp.mkd(remote_dir)
+    public void createDirectory(String remoteDir) throws IOException {
+        ftpClient.makeDirectory(remoteDir);
+    }
     
-    def __enter__(self):
-        return self.connect()
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.disconnect()
+    @Override
+    public void close() {
+        disconnect();
+    }
+}
 
-# Usage
-with FTPAdapter('ftp.example.com', 'user', 'pass', use_tls=True) as ftp:
-    # Upload file
-    ftp.upload('local_data.csv', '/remote/data.csv')
+// Usage
+try (FTPAdapter ftp = new FTPAdapter("ftp.example.com", "user", "pass", 21, true).connect()) {
+    // Upload file
+    ftp.upload(Path.of("local_data.csv"), "/remote/data.csv");
     
-    # List files
-    files = ftp.list_files('/remote')
+    // List files
+    String[] files = ftp.listFiles("/remote");
     
-    # Download file
-    ftp.download('/remote/results.csv', 'local_results.csv')
+    // Download file
+    ftp.download("/remote/results.csv", Path.of("local_results.csv"));
+}
 ```
 
 **Advanced FTP Adapter** (Retry, Logging, Progress):
 
-```python
-import time
-import logging
-from tqdm import tqdm
+```java
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.function.Supplier;
 
-class AdvancedFTPAdapter(FTPAdapter):
-    def __init__(self, *args, max_retries=3, retry_delay=5, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.logger = logging.getLogger(__name__)
+/**
+ * Advanced FTP adapter with retry logic, logging, and progress tracking.
+ */
+public class AdvancedFTPAdapter extends FTPAdapter {
     
-    def _retry_operation(self, operation, *args, **kwargs):
-        for attempt in range(self.max_retries):
-            try:
-                return operation(*args, **kwargs)
-            except Exception as e:
-                self.logger.warning(f"Attempt {attempt + 1} failed: {e}")
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay)
-                    # Reconnect
-                    self.disconnect()
-                    self.connect()
-                else:
-                    raise
+    private static final Logger logger = LoggerFactory.getLogger(AdvancedFTPAdapter.class);
     
-    def upload_with_progress(self, local_path, remote_path):
-        file_size = os.path.getsize(local_path)
+    private final int maxRetries;
+    private final long retryDelayMs;
+    
+    public AdvancedFTPAdapter(String host, String username, String password,
+                              int port, boolean useTls, int maxRetries, long retryDelayMs) {
+        super(host, username, password, port, useTls);
+        this.maxRetries = maxRetries;
+        this.retryDelayMs = retryDelayMs;
+    }
+    
+    /**
+     * Execute operation with retry logic.
+     */
+    private <T> T retryOperation(Supplier<T> operation) throws IOException {
+        Exception lastException = null;
         
-        with open(local_path, 'rb') as file:
-            with tqdm(total=file_size, unit='B', unit_scale=True) as pbar:
-                def callback(data):
-                    pbar.update(len(data))
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                return operation.get();
+            } catch (Exception e) {
+                lastException = e;
+                logger.warn("Attempt {} failed: {}", attempt, e.getMessage());
                 
-                self._retry_operation(
-                    self.ftp.storbinary,
-                    f'STOR {remote_path}',
-                    file,
-                    callback=callback
-                )
+                if (attempt < maxRetries) {
+                    try {
+                        Thread.sleep(retryDelayMs);
+                        disconnect();
+                        connect();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted during retry", ie);
+                    }
+                }
+            }
+        }
+        throw new IOException("Operation failed after " + maxRetries + " attempts", lastException);
+    }
     
-    def sync_directory(self, local_dir, remote_dir):
-        """Sync local directory to remote"""
-        for root, dirs, files in os.walk(local_dir):
-            # Create remote directories
-            rel_path = os.path.relpath(root, local_dir)
-            if rel_path != '.':
-                remote_path = f"{remote_dir}/{rel_path}"
-                try:
-                    self.create_directory(remote_path)
-                except:
-                    pass  # Directory might exist
-            
-            # Upload files
-            for file in files:
-                local_file = os.path.join(root, file)
-                remote_file = f"{remote_dir}/{rel_path}/{file}"
-                self.logger.info(f"Uploading {local_file} to {remote_file}")
-                self.upload_with_progress(local_file, remote_file)
+    /**
+     * Upload with progress callback.
+     */
+    public void uploadWithProgress(Path localPath, String remotePath, 
+                                   ProgressCallback callback) throws IOException {
+        long fileSize = Files.size(localPath);
+        long uploaded = 0;
+        
+        try (InputStream input = new BufferedInputStream(Files.newInputStream(localPath))) {
+            // Custom progress tracking implementation
+            retryOperation(() -> {
+                super.upload(localPath, remotePath);
+                return true;
+            });
+        }
+        
+        if (callback != null) {
+            callback.onComplete(fileSize);
+        }
+    }
+    
+    /**
+     * Sync local directory to remote.
+     */
+    public void syncDirectory(Path localDir, String remoteDir) throws IOException {
+        Files.walk(localDir).forEach(localPath -> {
+            try {
+                Path relativePath = localDir.relativize(localPath);
+                String remotePath = remoteDir + "/" + relativePath.toString().replace("\\", "/");
+                
+                if (Files.isDirectory(localPath)) {
+                    try {
+                        createDirectory(remotePath);
+                    } catch (IOException e) {
+                        // Directory might already exist
+                    }
+                } else {
+                    logger.info("Uploading {} to {}", localPath, remotePath);
+                    upload(localPath, remotePath);
+                }
+            } catch (IOException e) {
+                logger.error("Failed to sync {}: {}", localPath, e.getMessage());
+            }
+        });
+    }
+    
+    @FunctionalInterface
+    public interface ProgressCallback {
+        void onComplete(long totalBytes);
+    }
+}
 
-# Usage
-adapter = AdvancedFTPAdapter(
-    'ftp.example.com',
-    'user',
-    'pass',
-    use_tls=True,
-    max_retries=3
-)
-
-with adapter:
-    # Sync entire directory
-    adapter.sync_directory('/local/data', '/remote/backup')
+// Usage
+try (AdvancedFTPAdapter ftp = new AdvancedFTPAdapter(
+        "ftp.example.com", "user", "pass", 21, true, 3, 5000L)) {
+    ftp.connect();
+    ftp.syncDirectory(Path.of("/local/data"), "/remote/backup");
+}
 ```
 
 ### SFTP Adapter (SSH File Transfer)
 
-```python
-import paramiko
+```java
+import com.jcraft.jsch.*;
+import java.io.*;
+import java.util.*;
 
-class SFTPAdapter:
-    def __init__(self, host, username, password=None, key_file=None, port=22):
-        self.host = host
-        self.username = username
-        self.password = password
-        self.key_file = key_file
-        self.port = port
-        self.transport = None
-        self.sftp = None
+/**
+ * SFTP adapter for secure file transfers using SSH.
+ * Supports both password and key-based authentication.
+ */
+public class SFTPAdapter implements AutoCloseable {
     
-    def connect(self):
-        self.transport = paramiko.Transport((self.host, self.port))
+    private final String host;
+    private final String username;
+    private final String password;
+    private final String keyFile;
+    private final int port;
+    
+    private Session session;
+    private ChannelSftp sftpChannel;
+    
+    public SFTPAdapter(String host, String username, String password, 
+                       String keyFile, int port) {
+        this.host = host;
+        this.username = username;
+        this.password = password;
+        this.keyFile = keyFile;
+        this.port = port;
+    }
+    
+    public SFTPAdapter connect() throws JSchException {
+        JSch jsch = new JSch();
         
-        if self.key_file:
-            private_key = paramiko.RSAKey.from_private_key_file(self.key_file)
-            self.transport.connect(username=self.username, pkey=private_key)
-        else:
-            self.transport.connect(username=self.username, password=self.password)
+        if (keyFile != null) {
+            jsch.addIdentity(keyFile);
+        }
         
-        self.sftp = paramiko.SFTPClient.from_transport(self.transport)
-        return self
+        session = jsch.getSession(username, host, port);
+        
+        if (password != null) {
+            session.setPassword(password);
+        }
+        
+        session.setConfig("StrictHostKeyChecking", "no");
+        session.connect();
+        
+        Channel channel = session.openChannel("sftp");
+        channel.connect();
+        sftpChannel = (ChannelSftp) channel;
+        
+        return this;
+    }
     
-    def disconnect(self):
-        if self.sftp:
-            self.sftp.close()
-        if self.transport:
-            self.transport.close()
+    public void disconnect() {
+        if (sftpChannel != null) sftpChannel.disconnect();
+        if (session != null) session.disconnect();
+    }
     
-    def upload(self, local_path, remote_path):
-        self.sftp.put(local_path, remote_path)
+    public void upload(String localPath, String remotePath) throws SftpException {
+        sftpChannel.put(localPath, remotePath);
+    }
     
-    def download(self, remote_path, local_path):
-        self.sftp.get(remote_path, local_path)
+    public void download(String remotePath, String localPath) throws SftpException {
+        sftpChannel.get(remotePath, localPath);
+    }
     
-    def list_files(self, remote_dir='/'):
-        return self.sftp.listdir(remote_dir)
-    
-    def __enter__(self):
-        return self.connect()
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.disconnect()
+    public List<String> listFiles(String remoteDir) throws SftpException {
+        List<String> files = new ArrayList<>();
+        Vector<ChannelSftp.LsEntry> entries = sftpChannel.ls(remoteDir);
+        for (ChannelSftp.LsEntry entry : entries) {
 ```
 
 ### Use Cases in System Design
 
 **1. ETL Pipelines**:
-```python
-# Extract from FTP, Transform, Load to DB
-with FTPAdapter('ftp.source.com', 'user', 'pass') as ftp:
-    ftp.download('/data/export.csv', 'temp/export.csv')
-
-csv_adapter = CSVAdapter()
-data = csv_adapter.read('temp/export.csv')
-
-transformed = transform_data(data)
-
-db.bulk_insert('target_table', transformed)
+```java
+/**
+ * ETL Pipeline: Extract from FTP, Transform, Load to Database.
+ */
+public class ETLPipeline {
+    
+    private final FTPAdapter ftpAdapter;
+    private final CSVAdapter csvAdapter;
+    private final JdbcTemplate db;
+    
+    public void runPipeline() throws Exception {
+        // Extract: Download from FTP
+        try (FTPAdapter ftp = ftpAdapter.connect()) {
+            ftp.download("/data/export.csv", Path.of("temp/export.csv"));
+        }
+        
+        // Transform: Read and process CSV data
+        List<DataRow> data = csvAdapter.read(Path.of("temp/export.csv"), DataRow.class);
+        List<TransformedRow> transformed = transformData(data);
+        
+        // Load: Bulk insert into database
+        db.batchUpdate("INSERT INTO target_table VALUES (?, ?, ?)", transformed);
+    }
+}
 ```
 
 **2. Legacy System Integration**:
-```python
-# Many legacy systems only support FTP for data exchange
-class LegacySystemAdapter:
-    def __init__(self):
-        self.ftp = FTPAdapter('legacy.ftp.com', 'user', 'pass')
+```java
+/**
+ * Adapter for legacy systems that only support FTP for data exchange.
+ */
+public class LegacySystemAdapter {
     
-    def export_orders(self, orders):
-        # Convert modern format to legacy CSV
-        csv_adapter = CSVAdapter()
-        csv_adapter.write('orders.csv', orders)
-        
-        # Upload to legacy FTP
-        with self.ftp:
-            self.ftp.upload('orders.csv', '/import/orders.csv')
+    private final FTPAdapter ftp;
+    private final CSVAdapter csvAdapter;
     
-    def import_results(self):
-        # Download from FTP
-        with self.ftp:
-            self.ftp.download('/export/results.csv', 'results.csv')
+    public LegacySystemAdapter() {
+        this.ftp = new FTPAdapter("legacy.ftp.com", "user", "pass", 21, false);
+        this.csvAdapter = new CSVAdapter();
+    }
+    
+    public void exportOrders(List<Order> orders) throws Exception {
+        // Convert to CSV format
+        csvAdapter.write(Path.of("orders.csv"), orders);
         
-        # Parse and return
-        csv_adapter = CSVAdapter()
-        return csv_adapter.read('results.csv')
+        // Upload to legacy FTP
+        try (FTPAdapter connected = ftp.connect()) {
+            connected.upload(Path.of("orders.csv"), "/import/orders.csv");
+        }
+    }
+    
+    public List<Result> importResults() throws Exception {
+        // Download from FTP
+        try (FTPAdapter connected = ftp.connect()) {
+            connected.download("/export/results.csv", Path.of("results.csv"));
+        }
+        
+        // Parse and return
+        return csvAdapter.read(Path.of("results.csv"), Result.class);
+    }
+}
 ```
 
 ---
@@ -4118,22 +5889,30 @@ class LegacySystemAdapter:
 **Implementation**: ACID transactions, distributed consensus (Paxos, Raft)
 
 **Example**:
-```python
-# Bank account transfer (must be strongly consistent)
-def transfer(from_account, to_account, amount):
-    with db.transaction():  # ACID transaction
-        # Read current balances
-        from_balance = db.query("SELECT balance FROM accounts WHERE id = ?", from_account)
-        to_balance = db.query("SELECT balance FROM accounts WHERE id = ?", to_account)
-        
-        # Update balances
-        db.execute("UPDATE accounts SET balance = ? WHERE id = ?", 
-                   from_balance - amount, from_account)
-        db.execute("UPDATE accounts SET balance = ? WHERE id = ?", 
-                   to_balance + amount, to_account)
-        
-        # Both updates commit atomically
-        # No intermediate state visible to other transactions
+```java
+/**
+ * Bank account transfer - requires strong consistency.
+ * Uses ACID transactions to ensure atomicity and isolation.
+ */
+@Transactional(isolation = Isolation.SERIALIZABLE)
+public void transfer(Long fromAccount, Long toAccount, BigDecimal amount) {
+    // Read current balances within transaction
+    BigDecimal fromBalance = jdbcTemplate.queryForObject(
+        "SELECT balance FROM accounts WHERE id = ? FOR UPDATE",
+        BigDecimal.class, fromAccount);
+    BigDecimal toBalance = jdbcTemplate.queryForObject(
+        "SELECT balance FROM accounts WHERE id = ? FOR UPDATE",
+        BigDecimal.class, toAccount);
+    
+    // Update balances atomically
+    jdbcTemplate.update("UPDATE accounts SET balance = ? WHERE id = ?",
+        fromBalance.subtract(amount), fromAccount);
+    jdbcTemplate.update("UPDATE accounts SET balance = ? WHERE id = ?",
+        toBalance.add(amount), toAccount);
+    
+    // Both updates commit atomically
+    // No intermediate state visible to other transactions
+}
 ```
 
 **Pros**:
@@ -4158,25 +5937,41 @@ def transfer(from_account, to_account, amount):
 **Implementation**: Asynchronous replication, gossip protocols
 
 **Example**:
-```python
-# Social media likes (eventual consistency acceptable)
-def like_post(post_id, user_id):
-    # Write to local datacenter (fast)
-    local_db.execute("INSERT INTO likes (post_id, user_id) VALUES (?, ?)",
-                     post_id, user_id)
+```java
+/**
+ * Social media likes - eventual consistency is acceptable.
+ * Fast local write with async replication.
+ */
+@Service
+public class LikeService {
     
-    # Asynchronously replicate to other datacenters
-    replication_queue.enqueue({
-        'operation': 'insert',
-        'table': 'likes',
-        'data': {'post_id': post_id, 'user_id': user_id}
-    })
+    private final JdbcTemplate localDb;
+    private final KafkaTemplate<String, ReplicationEvent> replicationQueue;
     
-    # Immediate response to user
-    return "Liked!"
-
-# User in another datacenter might not see the like immediately
-# But will see it after replication completes (seconds to minutes)
+    /**
+     * Like a post with eventual consistency.
+     */
+    public String likePost(Long postId, Long userId) {
+        // Write to local datacenter (fast, low latency)
+        localDb.update("INSERT INTO likes (post_id, user_id) VALUES (?, ?)",
+            postId, userId);
+        
+        // Asynchronously replicate to other datacenters
+        ReplicationEvent event = ReplicationEvent.builder()
+            .operation("insert")
+            .table("likes")
+            .data(Map.of("post_id", postId, "user_id", userId))
+            .build();
+        
+        replicationQueue.send("replication-topic", event);
+        
+        // Immediate response to user
+        return "Liked!";
+        
+        // Note: Users in other datacenters might not see this like immediately
+        // But will see it after replication completes (seconds to minutes)
+    }
+}
 ```
 
 **Pros**:
@@ -4258,52 +6053,79 @@ AP: Available + Partition Tolerant
 ### Handling Eventual Consistency
 
 **1. Conflict Resolution (Last-Write-Wins)**:
-```python
-class EventuallyConsistentDB:
-    def write(self, key, value):
-        timestamp = time.time()
-        self.store(key, value, timestamp)
-        self.replicate_async(key, value, timestamp)
+```java
+/**
+ * Eventually consistent database with LWW conflict resolution.
+ */
+public class EventuallyConsistentDB {
     
-    def merge_conflict(self, local_value, remote_value):
-        # Resolve by timestamp (LWW)
-        if remote_value.timestamp > local_value.timestamp:
-            return remote_value
-        return local_value
+    public void write(String key, Object value) {
+        long timestamp = System.currentTimeMillis();
+        store(key, value, timestamp);
+        replicateAsync(key, value, timestamp);
+    }
+    
+    public <T extends Timestamped> T mergeConflict(T localValue, T remoteValue) {
+        // Resolve by timestamp (Last-Write-Wins)
+        if (remoteValue.getTimestamp() > localValue.getTimestamp()) {
+            return remoteValue;
+        }
+        return localValue;
+    }
+}
 ```
 
 **2. Vector Clocks (Detect Conflicts)**:
-```python
-# Track causality across replicas
-vector_clock = {
-    'replica_1': 5,  # 5 writes on replica 1
-    'replica_2': 3,  # 3 writes on replica 2
-    'replica_3': 7   # 7 writes on replica 3
+```java
+/**
+ * Vector clock for tracking causality across replicas.
+ */
+public class VectorClock {
+    // Track writes per replica
+    private final Map<String, Long> clock = new ConcurrentHashMap<>();
+    // Example: {"replica_1": 5, "replica_2": 3, "replica_3": 7}
+    
+    public void increment(String replicaId) {
+        clock.merge(replicaId, 1L, Long::sum);
+    }
+    
+    // Concurrent writes = conflict, application must resolve
+    public boolean isConcurrent(VectorClock other) {
+        return !this.happensBefore(other) && !other.happensBefore(this);
+    }
 }
-
-# Concurrent writes = conflict
-# Application must resolve
 ```
 
 **3. CRDTs (Conflict-Free Replicated Data Types)**:
-```python
-# G-Counter (Grow-only counter)
-class GCounter:
-    def __init__(self, replica_id):
-        self.replica_id = replica_id
-        self.counts = defaultdict(int)
+```java
+/**
+ * G-Counter (Grow-only counter) - a CRDT that automatically
+ * resolves conflicts without coordination.
+ */
+public class GCounter {
     
-    def increment(self):
-        self.counts[self.replica_id] += 1
+    private final String replicaId;
+    private final Map<String, Long> counts = new ConcurrentHashMap<>();
     
-    def value(self):
-        return sum(self.counts.values())
+    public GCounter(String replicaId) {
+        this.replicaId = replicaId;
+    }
     
-    def merge(self, other):
-        for replica, count in other.counts.items():
-            self.counts[replica] = max(self.counts[replica], count)
+    public void increment() {
+        counts.merge(replicaId, 1L, Long::sum);
+    }
+    
+    public long value() {
+        return counts.values().stream().mapToLong(Long::longValue).sum();
+    }
+    
+    public void merge(GCounter other) {
+        other.counts.forEach((replica, count) -> 
+            counts.merge(replica, count, Math::max));
+    }
+}
 
-# Automatically resolves conflicts without coordination
+// Automatically resolves conflicts without coordination
 ```
 
 ### Trade-offs Summary
@@ -4386,17 +6208,15 @@ Latency: Median of RTT to 2 closest replicas
 
 **1. Two-Phase Commit (2PC)**:
 
-```python
-class TwoPhaseCommit:
-    def __init__(self, participants):
-        self.participants = participants
+```java
+/**
+ * Two-Phase Commit coordinator for distributed transactions.
+ */
+public class TwoPhaseCommit {
     
-    def execute_transaction(self, transaction):
-        # Phase 1: Prepare
-        prepare_results = []
-        for participant in self.participants:
-            result = participant.prepare(transaction)
-            prepare_results.append(result)
+    private final List<TransactionParticipant> participants;
+    
+    public TwoPhaseCommit(List<TransactionParticipant> participants) {
         
         # Check if all prepared
         if all(result == 'PREPARED' for result in prepare_results):
@@ -4435,72 +6255,110 @@ Replication:
 
 **4. Saga Pattern (Long-Running Transactions)**:
 
-```python
-class Saga:
-    def __init__(self):
-        self.steps = []
-        self.compensations = []
-    
-    def add_step(self, action, compensation):
-        self.steps.append(action)
-        self.compensations.append(compensation)
-    
-    async def execute(self):
-        executed_steps = []
-        try:
-            for step in self.steps:
-                await step()
-                executed_steps.append(step)
-        except Exception as e:
-            # Rollback: Execute compensations in reverse
-            for i in range(len(executed_steps) - 1, -1, -1):
-                await self.compensations[i]()
-            raise
+```java
+import java.util.*;
 
-# Example: E-commerce order
-saga = Saga()
-saga.add_step(
-    action=lambda: reserve_inventory(product_id, quantity),
-    compensation=lambda: release_inventory(product_id, quantity)
-)
-saga.add_step(
-    action=lambda: charge_payment(user_id, amount),
-    compensation=lambda: refund_payment(user_id, amount)
-)
-saga.add_step(
-    action=lambda: create_shipment(order_id),
-    compensation=lambda: cancel_shipment(order_id)
-)
+/**
+ * Saga orchestrator for long-running distributed transactions.
+ * Implements compensating transactions for rollback.
+ */
+public class Saga {
+    
+    private final List<SagaStep> steps = new ArrayList<>();
+    
+    public void addStep(Runnable action, Runnable compensation) {
+        steps.add(new SagaStep(action, compensation));
+    }
+    
+    public void execute() throws SagaExecutionException {
+        List<SagaStep> executedSteps = new ArrayList<>();
+        
+        try {
+            for (SagaStep step : steps) {
+                step.action.run();
+                executedSteps.add(step);
+            }
+        } catch (Exception e) {
+            // Rollback: Execute compensations in reverse order
+            Collections.reverse(executedSteps);
+            for (SagaStep step : executedSteps) {
+                try {
+                    step.compensation.run();
+                } catch (Exception compEx) {
+                    // Log and continue with other compensations
+                }
+            }
+            throw new SagaExecutionException("Saga failed, compensations executed", e);
+        }
+    }
+    
+    private record SagaStep(Runnable action, Runnable compensation) {}
+}
 
-await saga.execute()
+// Example: E-commerce order saga
+public class OrderSaga {
+    
+    public void placeOrder(Order order) throws SagaExecutionException {
+        Saga saga = new Saga();
+        
+        saga.addStep(
+            () -> inventoryService.reserve(order.getProductId(), order.getQuantity()),
+            () -> inventoryService.release(order.getProductId(), order.getQuantity())
+        );
+        
+        saga.addStep(
+            () -> paymentService.charge(order.getUserId(), order.getAmount()),
+            () -> paymentService.refund(order.getUserId(), order.getAmount())
+        );
+        
+        saga.addStep(
+            () -> shippingService.createShipment(order.getId()),
+            () -> shippingService.cancelShipment(order.getId())
+        );
+        
+        saga.execute();
+    }
+}
 ```
 
 ### Conflict Resolution Strategies
 
 **1. Last-Write-Wins (LWW)**:
-```python
-def resolve_conflict(local_doc, remote_doc):
-    if remote_doc.timestamp > local_doc.timestamp:
-        return remote_doc
-    return local_doc
+```java
+/**
+ * Last-Write-Wins conflict resolution.
+ * Simple but can lose concurrent writes.
+ */
+public <T extends Timestamped> T resolveConflict(T localDoc, T remoteDoc) {
+    if (remoteDoc.getTimestamp().isAfter(localDoc.getTimestamp())) {
+        return remoteDoc;
+    }
+    return localDoc;
+}
 ```
 **Issue**: Can lose concurrent writes
 
 **2. Application-Specific Logic**:
-```python
-def resolve_shopping_cart(local_cart, remote_cart):
-    # Union of items (merge)
-    merged_items = {}
-    for item in local_cart.items + remote_cart.items:
-        if item.id in merged_items:
-            # Keep max quantity
-            merged_items[item.id].quantity = max(
-                merged_items[item.id].quantity,
-                item.quantity
-            )
-        else:
-            merged_items[item.id] = item
-    return merged_items.values()
+```java
+/**
+ * Merge shopping carts using application-specific logic.
+ * Takes union of items with max quantity for conflicts.
+ */
+public Collection<CartItem> resolveShoppingCart(Cart localCart, Cart remoteCart) {
+    Map<Long, CartItem> mergedItems = new HashMap<>();
+    
+    // Combine all items from both carts
+    Stream.concat(localCart.getItems().stream(), remoteCart.getItems().stream())
+        .forEach(item -> {
+            mergedItems.merge(item.getId(), item, (existing, newItem) -> {
+                // Keep max quantity on conflict
+                existing.setQuantity(Math.max(existing.getQuantity(), newItem.getQuantity()));
+                return existing;
+            });
+        });
+    
+    return mergedItems.values();
+}
 ```
 
 **3. CRDTs (Conflict-Free Replicated Data Types)**:
@@ -4517,21 +6375,48 @@ Examples:
 
 **Metrics to Track**:
 
-```python
-# Replication lag
-replication_lag = master_timestamp - replica_timestamp
-# Alert if > 5 seconds
-
-# Consistency violations
-def check_consistency():
-    master_count = master_db.count('users')
-    replica_count = replica_db.count('users')
-    difference = abs(master_count - replica_count)
-    # Alert if difference > threshold
-
-# Conflict rate
-conflict_rate = conflicts_detected / total_writes
-# Monitor for spikes
+```java
+/**
+ * Consistency monitoring service for distributed databases.
+ */
+@Component
+public class ConsistencyMonitor {
+    
+    private final MeterRegistry metricsRegistry;
+    
+    /**
+     * Calculate replication lag between master and replica.
+     * Alert if > 5 seconds.
+     */
+    public Duration getReplicationLag(Instant masterTimestamp, Instant replicaTimestamp) {
+        Duration lag = Duration.between(replicaTimestamp, masterTimestamp);
+        metricsRegistry.gauge("replication.lag.seconds", lag.getSeconds());
+        return lag;
+    }
+    
+    /**
+     * Check consistency between master and replica counts.
+     * Alert if difference exceeds threshold.
+     */
+    public ConsistencyCheckResult checkConsistency(String tableName, long threshold) {
+        long masterCount = masterDb.count(tableName);
+        long replicaCount = replicaDb.count(tableName);
+        long difference = Math.abs(masterCount - replicaCount);
+        
+        metricsRegistry.gauge("consistency.difference." + tableName, difference);
+        
+        return new ConsistencyCheckResult(difference <= threshold, difference);
+    }
+    
+    /**
+     * Track conflict rate for monitoring dashboard.
+     */
+    public double calculateConflictRate(long conflictsDetected, long totalWrites) {
+        double rate = (double) conflictsDetected / totalWrites;
+        metricsRegistry.gauge("conflict.rate", rate);
+        return rate;
+    }
+}
 ```
 
 ---
@@ -4547,37 +6432,53 @@ Limit the number of requests a client can make to prevent abuse, ensure fair res
 
 **Concept**: Bucket holds tokens. Each request consumes a token. Tokens refill at constant rate.
 
-```python
-import time
+```java
+import java.util.concurrent.atomic.AtomicLong;
 
-class TokenBucket:
-    def __init__(self, capacity, refill_rate):
-        self.capacity = capacity  # Max tokens
-        self.tokens = capacity
-        self.refill_rate = refill_rate  # Tokens per second
-        self.last_refill = time.time()
+/**
+ * Token Bucket rate limiter implementation.
+ * Allows bursts up to bucket capacity, then rate-limits to refill rate.
+ */
+public class TokenBucket {
     
-    def allow_request(self):
-        self._refill()
-        if self.tokens >= 1:
-            self.tokens -= 1
-            return True
-        return False
+    private final int capacity;
+    private final double refillRate; // tokens per second
+    private double tokens;
+    private long lastRefillTime;
     
-    def _refill(self):
-        now = time.time()
-        elapsed = now - self.last_refill
-        tokens_to_add = elapsed * self.refill_rate
-        self.tokens = min(self.capacity, self.tokens + tokens_to_add)
-        self.last_refill = now
+    public TokenBucket(int capacity, double refillRate) {
+        this.capacity = capacity;
+        this.refillRate = refillRate;
+        this.tokens = capacity;
+        this.lastRefillTime = System.nanoTime();
+    }
+    
+    public synchronized boolean allowRequest() {
+        refill();
+        if (tokens >= 1) {
+            tokens -= 1;
+            return true;
+        }
+        return false;
+    }
+    
+    private void refill() {
+        long now = System.nanoTime();
+        double elapsedSeconds = (now - lastRefillTime) / 1_000_000_000.0;
+        double tokensToAdd = elapsedSeconds * refillRate;
+        tokens = Math.min(capacity, tokens + tokensToAdd);
+        lastRefillTime = now;
+    }
+}
 
-# Usage
-limiter = TokenBucket(capacity=100, refill_rate=10)  # 100 tokens, 10/sec refill
+// Usage
+TokenBucket limiter = new TokenBucket(100, 10); // 100 tokens, 10/sec refill
 
-if limiter.allow_request():
-    process_request()
-else:
-    return "Rate limit exceeded"
+if (limiter.allowRequest()) {
+    processRequest();
+} else {
+    return ResponseEntity.status(429).body("Rate limit exceeded");
+}
 ```
 
 **Pros**: Smooth rate limiting, allows bursts up to capacity
@@ -4587,33 +6488,48 @@ else:
 
 **Concept**: Requests enter a queue (bucket). Processed at constant rate. Overflow drops requests.
 
-```python
-from collections import deque
-import time
+```java
+import java.util.concurrent.ConcurrentLinkedDeque;
 
-class LeakyBucket:
-    def __init__(self, capacity, leak_rate):
-        self.capacity = capacity  # Max queue size
-        self.leak_rate = leak_rate  # Requests per second
-        self.queue = deque()
-        self.last_leak = time.time()
+/**
+ * Leaky Bucket rate limiter implementation.
+ * Processes requests at a constant rate, queues up to capacity.
+ */
+public class LeakyBucket {
     
-    def allow_request(self):
-        self._leak()
-        if len(self.queue) < self.capacity:
-            self.queue.append(time.time())
-            return True
-        return False
+    private final int capacity;
+    private final double leakRate; // requests per second
+    private final ConcurrentLinkedDeque<Long> queue;
+    private long lastLeakTime;
     
-    def _leak(self):
-        now = time.time()
-        elapsed = now - self.last_leak
-        leaks = int(elapsed * self.leak_rate)
+    public LeakyBucket(int capacity, double leakRate) {
+        this.capacity = capacity;
+        this.leakRate = leakRate;
+        this.queue = new ConcurrentLinkedDeque<>();
+        this.lastLeakTime = System.nanoTime();
+    }
+    
+    public synchronized boolean allowRequest() {
+        leak();
+        if (queue.size() < capacity) {
+            queue.addLast(System.nanoTime());
+            return true;
+        }
+        return false;
+    }
+    
+    private void leak() {
+        long now = System.nanoTime();
+        double elapsedSeconds = (now - lastLeakTime) / 1_000_000_000.0;
+        int leaks = (int) (elapsedSeconds * leakRate);
         
-        for _ in range(min(leaks, len(self.queue))):
-            self.queue.popleft()
+        for (int i = 0; i < Math.min(leaks, queue.size()); i++) {
+            queue.pollFirst();
+        }
         
-        self.last_leak = now
+        lastLeakTime = now;
+    }
+}
 ```
 
 **Pros**: Smooth output rate, prevents spikes
@@ -4621,28 +6537,41 @@ class LeakyBucket:
 
 **3. Fixed Window Counter**
 
-```python
-import time
-
-class FixedWindowCounter:
-    def __init__(self, limit, window_seconds):
-        self.limit = limit
-        self.window_seconds = window_seconds
-        self.count = 0
-        self.window_start = time.time()
+```java
+/**
+ * Fixed Window Counter rate limiter.
+ * Simple but can allow bursts at window boundaries.
+ */
+public class FixedWindowCounter {
     
-    def allow_request(self):
-        now = time.time()
+    private final int limit;
+    private final long windowSeconds;
+    private int count;
+    private long windowStart;
+    
+    public FixedWindowCounter(int limit, long windowSeconds) {
+        this.limit = limit;
+        this.windowSeconds = windowSeconds;
+        this.count = 0;
+        this.windowStart = System.currentTimeMillis() / 1000;
+    }
+    
+    public synchronized boolean allowRequest() {
+        long now = System.currentTimeMillis() / 1000;
         
-        # Reset window if expired
-        if now - self.window_start >= self.window_seconds:
-            self.count = 0
-            self.window_start = now
+        // Reset window if expired
+        if (now - windowStart >= windowSeconds) {
+            count = 0;
+            windowStart = now;
+        }
         
-        if self.count < self.limit:
-            self.count += 1
-            return True
-        return False
+        if (count < limit) {
+            count++;
+            return true;
+        }
+        return false;
+    }
+}
 ```
 
 **Pros**: Simple, low memory
@@ -4650,28 +6579,41 @@ class FixedWindowCounter:
 
 **4. Sliding Window Log**
 
-```python
-import time
-from collections import deque
+```java
+import java.util.concurrent.ConcurrentLinkedDeque;
 
-class SlidingWindowLog:
-    def __init__(self, limit, window_seconds):
-        self.limit = limit
-        self.window_seconds = window_seconds
-        self.requests = deque()  # Timestamps
+/**
+ * Sliding Window Log rate limiter.
+ * Accurate but memory grows with request count.
+ */
+public class SlidingWindowLog {
     
-    def allow_request(self):
-        now = time.time()
+    private final int limit;
+    private final long windowSeconds;
+    private final ConcurrentLinkedDeque<Long> requests; // Timestamps
+    
+    public SlidingWindowLog(int limit, long windowSeconds) {
+        this.limit = limit;
+        this.windowSeconds = windowSeconds;
+        this.requests = new ConcurrentLinkedDeque<>();
+    }
+    
+    public synchronized boolean allowRequest() {
+        long now = System.currentTimeMillis();
+        long cutoff = now - (windowSeconds * 1000);
         
-        # Remove expired entries
-        cutoff = now - self.window_seconds
-        while self.requests and self.requests[0] < cutoff:
-            self.requests.popleft()
+        // Remove expired entries
+        while (!requests.isEmpty() && requests.peekFirst() < cutoff) {
+            requests.pollFirst();
+        }
         
-        if len(self.requests) < self.limit:
-            self.requests.append(now)
-            return True
-        return False
+        if (requests.size() < limit) {
+            requests.addLast(now);
+            return true;
+        }
+        return false;
+    }
+}
 ```
 
 **Pros**: Accurate, no boundary issues
@@ -4679,27 +6621,28 @@ class SlidingWindowLog:
 
 **5. Sliding Window Counter (Redis)**
 
-```python
-import redis
-import time
+```java
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import java.util.*;
 
-class SlidingWindowRedis:
-    def __init__(self, redis_client, limit, window_seconds):
-        self.redis = redis_client
-        self.limit = limit
-        self.window_seconds = window_seconds
+/**
+ * Redis-based Sliding Window rate limiter.
+ * Uses Lua script for atomic operations.
+ */
+public class SlidingWindowRedis {
     
-    def allow_request(self, user_id):
-        key = f"rate_limit:{user_id}"
-        now = time.time()
-        window_start = now - self.window_seconds
-        
-        # Lua script for atomic operation
-        lua_script = """
+    private final RedisTemplate<String, String> redis;
+    private final int limit;
+    private final long windowSeconds;
+    
+    // Lua script for atomic rate limiting
+    private static final String LUA_SCRIPT = """
         local key = KEYS[1]
         local now = tonumber(ARGV[1])
         local window_start = tonumber(ARGV[2])
         local limit = tonumber(ARGV[3])
+        local window_seconds = tonumber(ARGV[4])
         
         -- Remove old entries
         redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
@@ -4714,18 +6657,33 @@ class SlidingWindowRedis:
         else
             return 0
         end
-        """
+        """;
+    
+    public SlidingWindowRedis(RedisTemplate<String, String> redis, int limit, long windowSeconds) {
+        this.redis = redis;
+        this.limit = limit;
+        this.windowSeconds = windowSeconds;
+    }
+    
+    public boolean allowRequest(String userId) {
+        String key = "rate_limit:" + userId;
+        long now = System.currentTimeMillis();
+        long windowStart = now - (windowSeconds * 1000);
         
-        result = self.redis.eval(
-            lua_script,
-            1,
-            key,
-            now,
-            window_start,
-            self.limit
-        )
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(LUA_SCRIPT, Long.class);
         
-        return result == 1
+        Long result = redis.execute(
+            script,
+            Collections.singletonList(key),
+            String.valueOf(now),
+            String.valueOf(windowStart),
+            String.valueOf(limit),
+            String.valueOf(windowSeconds)
+        );
+        
+        return result != null && result == 1;
+    }
+}
 ```
 
 ### Distributed Rate Limiting
@@ -4734,123 +6692,178 @@ class SlidingWindowRedis:
 
 **Solution 1: Centralized Counter (Redis)**:
 
-```python
-class DistributedRateLimiter:
-    def __init__(self, redis_client):
-        self.redis = redis_client
+```java
+/**
+ * Distributed Rate Limiter using Redis for shared state across servers.
+ */
+@Component
+public class DistributedRateLimiter {
     
-    def check_rate_limit(self, key, limit, window_seconds):
-        pipe = self.redis.pipeline()
-        now = int(time.time())
-        window_key = f"{key}:{now // window_seconds}"
+    private final RedisTemplate<String, String> redis;
+    
+    public DistributedRateLimiter(RedisTemplate<String, String> redis) {
+        this.redis = redis;
+    }
+    
+    public boolean checkRateLimit(String key, int limit, int windowSeconds) {
+        long now = System.currentTimeMillis() / 1000;
+        String windowKey = key + ":" + (now / windowSeconds);
         
-        pipe.incr(window_key)
-        pipe.expire(window_key, window_seconds * 2)
-        result = pipe.execute()
+        Long count = redis.opsForValue().increment(windowKey);
+        if (count == 1) {
+            redis.expire(windowKey, Duration.ofSeconds(windowSeconds * 2));
+        }
         
-        count = result[0]
-        return count <= limit
+        return count != null && count <= limit;
+    }
+}
 
-# Usage across multiple servers
-if not limiter.check_rate_limit(f"user:{user_id}", limit=100, window_seconds=60):
-    return "Rate limit exceeded", 429
+// Usage across multiple servers
+if (!limiter.checkRateLimit("user:" + userId, 100, 60)) {
+    return ResponseEntity.status(429).body("Rate limit exceeded");
+}
 ```
 
 **Solution 2: Distributed Token Bucket**:
 
-```python
-def distributed_token_bucket(user_id, capacity, refill_rate):
-    key = f"token_bucket:{user_id}"
+```java
+/**
+ * Distributed Token Bucket using Redis with Lua script for atomicity.
+ */
+public class DistributedTokenBucket {
     
-    # Lua script for atomic token bucket
-    lua_script = """
-    local key = KEYS[1]
-    local capacity = tonumber(ARGV[1])
-    local refill_rate = tonumber(ARGV[2])
-    local now = tonumber(ARGV[3])
+    private final RedisTemplate<String, String> redis;
     
-    local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
-    local tokens = tonumber(bucket[1]) or capacity
-    local last_refill = tonumber(bucket[2]) or now
+    private static final String LUA_SCRIPT = """
+        local key = KEYS[1]
+        local capacity = tonumber(ARGV[1])
+        local refill_rate = tonumber(ARGV[2])
+        local now = tonumber(ARGV[3])
+
+        local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+        local tokens = tonumber(bucket[1]) or capacity
+        local last_refill = tonumber(bucket[2]) or now
+
+        -- Refill tokens
+        local elapsed = now - last_refill
+        local new_tokens = math.min(capacity, tokens + (elapsed * refill_rate))
+
+        if new_tokens >= 1 then
+            redis.call('HMSET', key, 'tokens', new_tokens - 1, 'last_refill', now)
+            redis.call('EXPIRE', key, 3600)
+            return 1
+        else
+            redis.call('HMSET', key, 'tokens', new_tokens, 'last_refill', now)
+            return 0
+        end
+        """;
     
-    -- Refill tokens
-    local elapsed = now - last_refill
-    local new_tokens = math.min(capacity, tokens + (elapsed * refill_rate))
+    public DistributedTokenBucket(RedisTemplate<String, String> redis) {
+        this.redis = redis;
+    }
     
-    if new_tokens >= 1 then
-        redis.call('HMSET', key, 'tokens', new_tokens - 1, 'last_refill', now)
-        redis.call('EXPIRE', key, 3600)
-        return 1
-    else
-        redis.call('HMSET', key, 'tokens', new_tokens, 'last_refill', now)
-        return 0
-    end
-    """
-    
-    result = redis_client.eval(
-        lua_script,
-        1,
-        key,
-        capacity,
-        refill_rate,
-        time.time()
-    )
-    
-    return result == 1
+    public boolean allowRequest(String userId, int capacity, double refillRate) {
+        String key = "token_bucket:" + userId;
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(LUA_SCRIPT, Long.class);
+        
+        Long result = redis.execute(script, 
+            Collections.singletonList(key),
+            String.valueOf(capacity),
+            String.valueOf(refillRate),
+            String.valueOf(System.currentTimeMillis() / 1000.0));
+        
+        return result != null && result == 1;
+    }
+}
 ```
 
 ### Tiered Rate Limiting
 
-```python
-class TieredRateLimiter:
-    def __init__(self):
-        self.limits = {
-            'free': {'requests': 100, 'window': 3600},  # 100/hour
-            'basic': {'requests': 1000, 'window': 3600},  # 1000/hour
-            'premium': {'requests': 10000, 'window': 3600},  # 10000/hour
-        }
+```java
+/**
+ * Tiered rate limiter with different limits based on subscription tier.
+ */
+public class TieredRateLimiter {
     
-    def check_limit(self, user_id, tier):
-        config = self.limits.get(tier, self.limits['free'])
-        return self.check_rate_limit(
-            f"user:{user_id}:{tier}",
-            config['requests'],
-            config['window']
-        )
+    private final DistributedRateLimiter rateLimiter;
+    private final Map<String, RateLimitConfig> tierLimits = Map.of(
+        "free", new RateLimitConfig(100, 3600),      // 100/hour
+        "basic", new RateLimitConfig(1000, 3600),    // 1000/hour
+        "premium", new RateLimitConfig(10000, 3600)  // 10000/hour
+    );
+    
+    public TieredRateLimiter(DistributedRateLimiter rateLimiter) {
+        this.rateLimiter = rateLimiter;
+    }
+    
+    public boolean checkLimit(String userId, String tier) {
+        RateLimitConfig config = tierLimits.getOrDefault(tier, tierLimits.get("free"));
+        String key = "user:" + userId + ":" + tier;
+        return rateLimiter.checkRateLimit(key, config.requests(), config.windowSeconds());
+    }
+    
+    private record RateLimitConfig(int requests, int windowSeconds) {}
+}
 ```
 
 ### Rate Limiting by Multiple Dimensions
 
-```python
-class MultiDimensionRateLimiter:
-    def allow_request(self, user_id, api_key, ip_address):
-        # Check multiple limits
-        checks = [
-            ('user', user_id, 1000, 60),  # 1000/min per user
-            ('api_key', api_key, 5000, 60),  # 5000/min per API key
-            ('ip', ip_address, 100, 60),  # 100/min per IP
-            ('global', 'all', 50000, 60),  # 50000/min globally
-        ]
+```java
+/**
+ * Multi-dimension rate limiter checking multiple limits per request.
+ */
+public class MultiDimensionRateLimiter {
+    
+    private final DistributedRateLimiter rateLimiter;
+    
+    public MultiDimensionRateLimiter(DistributedRateLimiter rateLimiter) {
+        this.rateLimiter = rateLimiter;
+    }
+    
+    public RateLimitResult allowRequest(String userId, String apiKey, String ipAddress) {
+        // Check multiple limits
+        List<RateLimitCheck> checks = List.of(
+            new RateLimitCheck("user", userId, 1000, 60),     // 1000/min per user
+            new RateLimitCheck("api_key", apiKey, 5000, 60),  // 5000/min per API key
+            new RateLimitCheck("ip", ipAddress, 100, 60),     // 100/min per IP
+            new RateLimitCheck("global", "all", 50000, 60)    // 50000/min globally
+        );
         
-        for dimension, key, limit, window in checks:
-            if not self.check_rate_limit(f"{dimension}:{key}", limit, window):
-                return False, f"Rate limit exceeded for {dimension}"
+        for (RateLimitCheck check : checks) {
+            String key = check.dimension() + ":" + check.key();
+            if (!rateLimiter.checkRateLimit(key, check.limit(), check.windowSeconds())) {
+                return new RateLimitResult(false, "Rate limit exceeded for " + check.dimension());
+            }
+        }
         
-        return True, None
+        return new RateLimitResult(true, null);
+    }
+    
+    private record RateLimitCheck(String dimension, String key, int limit, int windowSeconds) {}
+    public record RateLimitResult(boolean allowed, String reason) {}
+}
 ```
 
 ### Response Headers
 
-```python
-def add_rate_limit_headers(response, remaining, limit, reset_time):
-    response.headers['X-RateLimit-Limit'] = str(limit)
-    response.headers['X-RateLimit-Remaining'] = str(remaining)
-    response.headers['X-RateLimit-Reset'] = str(reset_time)
+```java
+/**
+ * Utility to add standard rate limit headers to HTTP responses.
+ */
+public class RateLimitHeaderUtils {
     
-    if remaining == 0:
-        response.headers['Retry-After'] = str(int(reset_time - time.time()))
-    
-    return response
+    public static void addRateLimitHeaders(HttpServletResponse response, 
+                                            int remaining, int limit, long resetTime) {
+        response.setHeader("X-RateLimit-Limit", String.valueOf(limit));
+        response.setHeader("X-RateLimit-Remaining", String.valueOf(remaining));
+        response.setHeader("X-RateLimit-Reset", String.valueOf(resetTime));
+        
+        if (remaining == 0) {
+            long retryAfter = resetTime - (System.currentTimeMillis() / 1000);
+            response.setHeader("Retry-After", String.valueOf(Math.max(0, retryAfter)));
+        }
+    }
+}
 ```
 
 ### Trade-offs Summary
@@ -4910,65 +6923,96 @@ top_10 = topk.get_top_k()
 
 **2. Count-Min Sketch (Probabilistic)**
 
-```python
-import mmh3  # MurmurHash
-import numpy as np
+```java
+import java.util.*;
 
-class CountMinSketch:
-    def __init__(self, width, depth):
-        self.width = width  # Number of counters per row
-        self.depth = depth  # Number of hash functions
-        self.table = np.zeros((depth, width), dtype=np.int64)
+/**
+ * Count-Min Sketch for approximate frequency counting.
+ * Space-efficient probabilistic data structure.
+ */
+public class CountMinSketch {
     
-    def _hash(self, item, seed):
-        return mmh3.hash(str(item), seed) % self.width
+    private final int width;
+    private final int depth;
+    private final long[][] table;
     
-    def add(self, item, count=1):
-        for i in range(self.depth):
-            index = self._hash(item, i)
-            self.table[i][index] += count
+    public CountMinSketch(int width, int depth) {
+        this.width = width;
+        this.depth = depth;
+        this.table = new long[depth][width];
+    }
     
-    def estimate(self, item):
-        # Return minimum count across all rows
-        counts = [self.table[i][self._hash(item, i)] for i in range(self.depth)]
-        return min(counts)
+    private int hash(String item, int seed) {
+        return Math.abs((item.hashCode() ^ seed) % width);
+    }
+    
+    public void add(String item, int count) {
+        for (int i = 0; i < depth; i++) {
+            table[i][hash(item, i)] += count;
+        }
+    }
+    
+    public void add(String item) { add(item, 1); }
+    
+    public long estimate(String item) {
+        long min = Long.MAX_VALUE;
+        for (int i = 0; i < depth; i++) {
+            min = Math.min(min, table[i][hash(item, i)]);
+        }
+        return min;
+    }
+}
 
-# Top K with Min-Heap
-class TopKHeavyHitter:
-    def __init__(self, k, width=10000, depth=7):
-        self.k = k
-        self.cms = CountMinSketch(width, depth)
-        self.min_heap = []  # (count, item)
-        self.items_in_heap = set()
+/**
+ * Top-K Heavy Hitter using Count-Min Sketch + Min-Heap.
+ */
+public class TopKHeavyHitter {
     
-    def add(self, item):
-        self.cms.add(item)
-        count = self.cms.estimate(item)
+    private final int k;
+    private final CountMinSketch cms;
+    private final PriorityQueue<ItemCount> minHeap;
+    private final Set<String> itemsInHeap;
+    
+    public TopKHeavyHitter(int k, int width, int depth) {
+        this.k = k;
+        this.cms = new CountMinSketch(width, depth);
+        this.minHeap = new PriorityQueue<>(Comparator.comparingLong(ic -> ic.count));
+        this.itemsInHeap = new HashSet<>();
+    }
+    
+    public void add(String item) {
+        cms.add(item);
+        long count = cms.estimate(item);
         
-        if item in self.items_in_heap:
-            # Update existing entry
-            self.min_heap = [(c, i) for c, i in self.min_heap if i != item]
-            heapq.heapify(self.min_heap)
-            heapq.heappush(self.min_heap, (count, item))
-        elif len(self.min_heap) < self.k:
-            # Heap not full
-            heapq.heappush(self.min_heap, (count, item))
-            self.items_in_heap.add(item)
-        elif count > self.min_heap[0][0]:
-            # Replace minimum
-            _, evicted = heapq.heapreplace(self.min_heap, (count, item))
-            self.items_in_heap.remove(evicted)
-            self.items_in_heap.add(item)
+        if (itemsInHeap.contains(item)) {
+            minHeap.removeIf(ic -> ic.item.equals(item));
+            minHeap.offer(new ItemCount(item, count));
+        } else if (minHeap.size() < k) {
+            minHeap.offer(new ItemCount(item, count));
+            itemsInHeap.add(item);
+        } else if (count > minHeap.peek().count) {
+            ItemCount evicted = minHeap.poll();
+            itemsInHeap.remove(evicted.item);
+            minHeap.offer(new ItemCount(item, count));
+            itemsInHeap.add(item);
+        }
+    }
     
-    def get_top_k(self):
-        return sorted(self.min_heap, reverse=True)
+    public List<ItemCount> getTopK() {
+        return minHeap.stream()
+            .sorted(Comparator.comparingLong((ItemCount ic) -> ic.count).reversed())
+            .toList();
+    }
+    
+    public record ItemCount(String item, long count) {}
+}
 
-# Usage
-hh = TopKHeavyHitter(k=100, width=100000, depth=7)
-for item in stream:
-    hh.add(item)
-
-top_100 = hh.get_top_k()
+// Usage
+TopKHeavyHitter hh = new TopKHeavyHitter(100, 100000, 7);
+for (String item : stream) {
+    hh.add(item);
+}
+List<TopKHeavyHitter.ItemCount> top100 = hh.getTopK();
 ```
 
 **Memory**: O(width × depth + k) = O(1) for fixed parameters
@@ -4977,44 +7021,60 @@ top_100 = hh.get_top_k()
 
 **3. Lossy Counting**
 
-```python
-class LossyCounting:
-    def __init__(self, support_threshold, error=0.001):
-        self.support = support_threshold
-        self.error = error
-        self.bucket_width = int(1 / error)
-        self.current_bucket = 1
-        self.counts = {}  # item -> (count, delta)
-        self.n = 0  # Total items processed
+```java
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Lossy Counting algorithm for finding frequent items.
+ * Guarantees no false negatives for items above threshold.
+ */
+public class LossyCounting {
     
-    def add(self, item):
-        self.n += 1
-        
-        if item in self.counts:
-            count, delta = self.counts[item]
-            self.counts[item] = (count + 1, delta)
-        else:
-            self.counts[item] = (1, self.current_bucket - 1)
-        
-        # Check if bucket boundary
-        if self.n % self.bucket_width == 0:
-            self.current_bucket += 1
-            self._prune()
+    private final double support;
+    private final double error;
+    private final int bucketWidth;
+    private int currentBucket = 1;
+    private final Map<String, CountDelta> counts = new HashMap<>();
+    private long n = 0;
     
-    def _prune(self):
-        # Remove items with count + delta <= current_bucket
-        to_remove = []
-        for item, (count, delta) in self.counts.items():
-            if count + delta <= self.current_bucket:
-                to_remove.append(item)
-        
-        for item in to_remove:
-            del self.counts[item]
+    public LossyCounting(double supportThreshold, double error) {
+        this.support = supportThreshold;
+        this.error = error;
+        this.bucketWidth = (int) (1.0 / error);
+    }
     
-    def get_frequent_items(self):
-        threshold = self.support * self.n
-        return [(item, count) for item, (count, _) in self.counts.items() 
-                if count >= threshold]
+    public void add(String item) {
+        n++;
+        
+        if (counts.containsKey(item)) {
+            CountDelta cd = counts.get(item);
+            counts.put(item, new CountDelta(cd.count + 1, cd.delta));
+        } else {
+            counts.put(item, new CountDelta(1, currentBucket - 1));
+        }
+        
+        if (n % bucketWidth == 0) {
+            currentBucket++;
+            prune();
+        }
+    }
+    
+    private void prune() {
+        counts.entrySet().removeIf(e -> 
+            e.getValue().count + e.getValue().delta <= currentBucket);
+    }
+    
+    public List<Map.Entry<String, Long>> getFrequentItems() {
+        double threshold = support * n;
+        return counts.entrySet().stream()
+            .filter(e -> e.getValue().count >= threshold)
+            .map(e -> Map.entry(e.getKey(), (long) e.getValue().count))
+            .collect(Collectors.toList());
+    }
+    
+    private record CountDelta(int count, int delta) {}
+}
 ```
 
 **Memory**: O(1/ε) where ε = error threshold
@@ -5022,32 +7082,50 @@ class LossyCounting:
 
 **4. Space-Saving Algorithm**
 
-```python
-import heapq
+```java
+import java.util.*;
 
-class SpaceSaving:
-    def __init__(self, k):
-        self.k = k
-        self.counters = {}  # item -> count
-        self.min_heap = []  # (count, item)
+/**
+ * Space-Saving algorithm for finding frequent items.
+ * Uses exactly K counters to track potential heavy hitters.
+ */
+public class SpaceSaving {
     
-    def add(self, item):
-        if item in self.counters:
-            # Increment existing counter
-            self.counters[item] += 1
-        elif len(self.counters) < self.k:
-            # Add new counter
-            self.counters[item] = 1
-            heapq.heappush(self.min_heap, (1, item))
-        else:
-            # Replace minimum counter
-            min_count, min_item = heapq.heappop(self.min_heap)
-            del self.counters[min_item]
-            self.counters[item] = min_count + 1
-            heapq.heappush(self.min_heap, (min_count + 1, item))
+    private final int k;
+    private final Map<String, Long> counters = new HashMap<>();
+    private final PriorityQueue<ItemCount> minHeap;
     
-    def get_top_k(self):
-        return sorted(self.counters.items(), key=lambda x: x[1], reverse=True)
+    public SpaceSaving(int k) {
+        this.k = k;
+        this.minHeap = new PriorityQueue<>(Comparator.comparingLong(ic -> ic.count));
+    }
+    
+    public void add(String item) {
+        if (counters.containsKey(item)) {
+            // Increment existing counter
+            counters.merge(item, 1L, Long::sum);
+        } else if (counters.size() < k) {
+            // Add new counter
+            counters.put(item, 1L);
+            minHeap.offer(new ItemCount(item, 1L));
+        } else {
+            // Replace minimum counter
+            ItemCount minItem = minHeap.poll();
+            counters.remove(minItem.item);
+            long newCount = minItem.count + 1;
+            counters.put(item, newCount);
+            minHeap.offer(new ItemCount(item, newCount));
+        }
+    }
+    
+    public List<Map.Entry<String, Long>> getTopK() {
+        return counters.entrySet().stream()
+            .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+            .toList();
+    }
+    
+    private record ItemCount(String item, long count) {}
+}
 ```
 
 **Memory**: O(k)
@@ -5057,41 +7135,72 @@ class SpaceSaving:
 
 **MapReduce Approach**:
 
-```python
-# Map phase: Each worker maintains local top K
-class Mapper:
-    def __init__(self, k):
-        self.local_topk = TopKHeavyHitter(k)
-    
-    def process_chunk(self, data_chunk):
-        for item in data_chunk:
-            self.local_topk.add(item)
-        return self.local_topk.get_top_k()
+```java
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.*;
 
-# Reduce phase: Merge local top K
-class Reducer:
-    def __init__(self, k):
-        self.k = k
-        self.global_counts = Counter()
+/**
+ * Distributed Top-K using MapReduce pattern.
+ */
+public class DistributedTopK {
     
-    def merge(self, local_topk_results):
-        for topk_list in local_topk_results:
-            for count, item in topk_list:
-                self.global_counts[item] += count
+    /**
+     * Map phase: Each worker maintains local top K.
+     */
+    public static class Mapper {
+        private final TopKHeavyHitter localTopK;
         
-        return heapq.nlargest(self.k, self.global_counts.items(), 
-                             key=lambda x: x[1])
+        public Mapper(int k) {
+            this.localTopK = new TopKHeavyHitter(k, 10000, 7);
+        }
+        
+        public List<TopKHeavyHitter.ItemCount> processChunk(List<String> dataChunk) {
+            for (String item : dataChunk) {
+                localTopK.add(item);
+            }
+            return localTopK.getTopK();
+        }
+    }
+    
+    /**
+     * Reduce phase: Merge local top K results.
+     */
+    public static class Reducer {
+        private final int k;
+        private final Map<String, Long> globalCounts = new HashMap<>();
+        
+        public Reducer(int k) {
+            this.k = k;
+        }
+        
+        public List<Map.Entry<String, Long>> merge(
+                List<List<TopKHeavyHitter.ItemCount>> localResults) {
+            for (List<TopKHeavyHitter.ItemCount> topKList : localResults) {
+                for (TopKHeavyHitter.ItemCount item : topKList) {
+                    globalCounts.merge(item.item(), item.count(), Long::sum);
+                }
+            }
+            
+            return globalCounts.entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                .limit(k)
+                .toList();
+        }
+    }
+}
 
-# Usage
-mappers = [Mapper(k=100) for _ in range(num_workers)]
-reducer = Reducer(k=100)
+// Usage
+int numWorkers = Runtime.getRuntime().availableProcessors();
+List<DistributedTopK.Mapper> mappers = new ArrayList<>();
+for (int i = 0; i < numWorkers; i++) {
+    mappers.add(new DistributedTopK.Mapper(100));
+}
+DistributedTopK.Reducer reducer = new DistributedTopK.Reducer(100);
 
-# Parallel processing
-local_results = parallel_map(lambda m, chunk: m.process_chunk(chunk), 
-                              mappers, data_chunks)
-
-# Merge
-global_top_100 = reducer.merge(local_results)
+// Process chunks in parallel and merge results
+List<List<TopKHeavyHitter.ItemCount>> localResults = // parallel processing
+List<Map.Entry<String, Long>> globalTop100 = reducer.merge(localResults);
 ```
 
 ### Real-Time Log Aggregation
@@ -5114,35 +7223,65 @@ Query Service:
 - Latency < 100ms
 ```
 
-**Implementation (Spark Streaming)**:
+**Implementation (Spark Streaming - Java)**:
 
-```python
-from pyspark.streaming import StreamingContext
+```java
+import org.apache.spark.streaming.*;
+import org.apache.spark.streaming.api.java.*;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import java.util.*;
 
-def update_top_k(new_values, state):
-    topk = state or TopKHeavyHitter(k=100)
-    for value in new_values:
-        topk.add(value)
-    return topk
-
-# Streaming context
-ssc = StreamingContext(spark_context, batch_interval=60)  # 1 min batches
-
-# Stream from Kafka
-logs = ssc.kafkaStream("log-topic")
-
-# Extract URLs from logs
-urls = logs.map(lambda log: extract_url(log))
-
-# Maintain state for top K
-top_k_state = urls.updateStateByKey(update_top_k)
-
-# Output to Redis every minute
-top_k_state.foreachRDD(lambda rdd: rdd.foreach(lambda kv: 
-    redis.set(f"topk:{kv[0]}", json.dumps(kv[1].get_top_k()))))
-
-ssc.start()
-ssc.awaitTermination()
+/**
+ * Real-time Top-K aggregation using Spark Streaming.
+ */
+public class TopKStreamProcessor {
+    
+    public static void main(String[] args) {
+        // Create streaming context with 1-minute batch interval
+        JavaStreamingContext jssc = new JavaStreamingContext(sparkConf, 
+            Durations.minutes(1));
+        jssc.checkpoint("hdfs://checkpoint/topk");
+        
+        // Stream from Kafka
+        JavaInputDStream<ConsumerRecord<String, String>> kafkaStream =
+            KafkaUtils.createDirectStream(jssc, 
+                LocationStrategies.PreferConsistent(),
+                ConsumerStrategies.Subscribe(Collections.singleton("log-topic"), 
+                    kafkaParams));
+        
+        // Extract URLs from logs
+        JavaDStream<String> urls = kafkaStream.map(record -> 
+            extractUrl(record.value()));
+        
+        // Maintain state for top K using updateStateByKey
+        JavaPairDStream<String, TopKHeavyHitter> topKState = urls
+            .mapToPair(url -> new Tuple2<>("global", url))
+            .updateStateByKey((newValues, state) -> {
+                TopKHeavyHitter topk = state.orElse(new TopKHeavyHitter(100, 10000, 7));
+                for (String value : newValues) {
+                    topk.add(value);
+                }
+                return Optional.of(topk);
+            });
+        
+        // Output to Redis every minute
+        topKState.foreachRDD(rdd -> {
+            rdd.foreach(tuple -> {
+                String key = "topk:" + tuple._1();
+                String value = objectMapper.writeValueAsString(tuple._2().getTopK());
+                redis.set(key, value);
+            });
+        });
+        
+        jssc.start();
+        jssc.awaitTermination();
+    }
+    
+    private static String extractUrl(String logLine) {
+        // Parse URL from log line
+        return logLine.split(" ")[6]; // Assuming standard log format
+    }
+}
 ```
 
 ### Trade-offs
