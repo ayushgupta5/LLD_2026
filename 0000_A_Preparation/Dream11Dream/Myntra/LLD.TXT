@@ -1,0 +1,138 @@
+/*
+
+Track User Clicks
+user clicks
+1. how many times
+2. Read for a user
+3. Read for a product
+
+User clicks on product
+1. which product user clicks
+2. How Many Times
+3. Who is the User?
+
+
+Product
+
+User
+
+clicks_user_product
+userType
+user_id
+product_id
+no_of_clicks
+created_at
+updated_at
+status
+
+User will search
+user will click on product
+[]product
+
+product_id=product_id
+fetch the product from the DB
+we will et product_id
+
+Guest user
+{
+	"idempotancy_key": "UUID",
+	"user_id": "user_1",
+	"User_type": "Guest User"
+	"product_id": "product_id_1"
+	"action": "click"
+	"created_at": "currentTimeWith Date and seconds and microseconds"
+}
+
+
+Existing User
+Req:-
+{
+	"idempotancy_key": "UUID",
+	"user_id": "user_1",
+	"user_type" : "member"
+	"product_id": "product_id_1"
+	"action": "click"
+	"created_at": "currentTimeWith Date and seconds and microseconds"
+}
+
+Respose:-
+{
+	"idempotancy_key": "UUID",
+	"state": "SUCCESS"
+	"click_counts": 3
+}
+
+Req-->
+1. Validation
+	1. idempotancy_key == ""
+	if(idempotancy_key=="") return err
+
+	2. user_id == "" --> if(user_id=="") return err
+		1. user_id is valid
+			fetch User
+			user.loogedIn
+			1. check in our DB that this user exists or not
+			if(isValidUser(userID) == false) {
+				return err
+			}
+	3. product_id == ""
+		if(isValidProduct(product_id) == false) {
+			return error
+		}
+	4. action ==""
+		if(action == "") return error
+			if(isValidAction(action) == false) return error
+
+
+NewIdempotency_key == UUID
+Lock()
+Once we updated the noOfClicks
+Lock should be released
+
+we have the DB= clicks_user_product
+if User.userType=="GuestUser" {
+	fetch clicks_user_product table with filter (product_id)
+	productID='p_id'
+	no_of_clicks=34+1;
+
+}
+Fetch the info with filter(userID, productID) --> select * from clicks_user_product where userId= 'userID' and product_id='productID' --> []clicks_user_product
+1. clicks_user_product[] == nil
+2. len(clicks_user_product[]) ==0
+3. prepare a New DTO with clicks_user_product payload --> we will fill the info with noOfClicks=1 and save it into the DB
+4. clicks_user_product
+	userID='111'
+	productID='p_id'
+	no_of_clicks=34
+
+newClicksUserProduct.NoOfClicks += 1;
+clicks_user_product
+	userID='111'
+	productID='p_id'
+	no_of_clicks=35
+we will update it into the DB
+
+
+Lock
+1. pessimistic lock
+	consistency : strong
+	more avalible system
+
+2. optimistic lock
+	consistency : EVENTUAL
+	more avalible system
+3. redis (pessimistic : It will behave link pessimistic lock)
+
+
+We should have a CRON JOB for remove garbage Data
+
+clicks_user_product
+userType
+user_id
+product_id
+no_of_clicks
+created_at
+updated_at
+status = INACTIVE
+
+*/

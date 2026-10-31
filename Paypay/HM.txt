@@ -1,0 +1,108 @@
+APM --> Auto Portfolio Revenue Management
+
+Ops --> Provide the CSV File (List of User with List of Portfolio Action) --> FICO --> Convert This info into JSON --> S3 Bucket
+
+Lending Team:-
+
+Batchify SVC (Fetching the Info from s3 Bucket + Parsing the JSON Body + Prepare the Payload and store the Portfolio Action into DB (PROCESSING) and Publish the Payload into the Queue)
++ ()DB Table --> Mark the status as SUCCESS abd FAILED
+
+Batchify --> Created New Row with status : PROCESSING --> SUCCESS
+
+
+AssetOffline(consume the payload to Queue + Validation + What is the CountryCode + What is the Portfolio Action (Limit change, tenor change, interest change), Prepare the another Payload and publish the payload to Queue) --> DB Table  (PROCESSING) --> (Mark the status as SUCCESS and Failed)
+
+AssetOffline --> Created New Row with status : PROCESSING --> SUCCESS
+
+
+Loan Management Service (Consume the Payload + User level Validation + Loan Level Validation + Check the action and perform the Portfolio Action)
+
+LMS --> New Row, Might or Might not be Created (ETB (Update 3-4X)  | NTB (Insert (X)))
+
+LMS --> ExpiryDate Change --> LoanCore (Change the Loan Parameter)
+
+
+DB Type : MySql Database
+
+CRON : 11 AM --> Fetch the Info from S3 Bucket (0.5-1.0 MILLION) (1 Million/100) -->
+Bachify Make the (1 M/100) Records
+AssetOffline Makes (1M/100) Records Batch Size = 100 (Configurable)
+
+LMS Service Make 0.5 M Records in Biweekly
+
+Indonesia --> 10 MILLION
+
+Insert : Update(x: 3x)
+
+
+LMS : Limit: 10 Million --> Update it by 10-->20 MILLION
+
+
+Kafka Rebalancing :-
+
+Publisher --> Kafka (Cluster --> Broker1, Broker2... --> Topics --> Partition --> offset)--> Consumer1, Consumer2, Consumer3
+
+Partition 1 --> Consumer1, 2
+Partition 2 --> Consumer3, 4
+
+p1-->m1, m4, m7
+p2-->m2, m5, m8
+p3-->m3, m6, m9
+
+Partition --> Offset (Array[0, 1, 2, 3, 4, 5, 6, 7 ....])
+m1 {
+	UserId: 1 (Indexing --> B+ Tree)
+	partfolioAction:
+	created_at: 2
+	updated_at:
+}
+
+m2{
+	UserId: 2 (Indexing --> B+ Tree)
+	partfolioAction:
+	created_at: 1
+	updated_at:
+}
+
+m3 {
+	UserId: 3 (Indexing --> B+ Tree)
+	partfolioAction:
+	created_at: 3
+	updated_at:
+}
+
+table: partfolioAction
+
+
+select * from partfolioAction order by id asc;
+
+REDIS: Faster
+
+LMS --> LoanCore --> Update the LIMIT (Annualy) --> LIMIT = 15M | May be Current Limit = 15 M | OldLimit = 10 Million|New Limit (New APM Portfolio Action): 15 M
+
+we need to call DB (Hey what is current Limit (GET API)) --> check the info into REDIS (Cache) --> Cache Hits --> Return the resposen | Fetch info from DB + Store new infor in REDIS with TTL value | Resturn the Response
+
+This Algo --> Cache Aside
+
+write throgh
+Read Throgh
+                      1 PM               1 PM
+updating | Insert --> cache --> sync --> DB (Issue: High Latency)
+
+					  1 PM 				1:03 PM
+updating | Insert --> cache --> Async --> DB (Issue: Low Latency)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

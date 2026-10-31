@@ -1,0 +1,8 @@
+services:
+    sftp:
+        image: atmoz/sftp
+        volumes:
+            - /Users/ayushkumar.gupta/Downloads/Docker/docker_volumes/sftp:/home/user/bilr_fico_response
+        ports:
+            - "2222:22"
+        command: user:password:1001

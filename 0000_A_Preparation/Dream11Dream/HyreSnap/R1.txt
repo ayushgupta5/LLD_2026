@@ -1,0 +1,175 @@
+/*
+Given a string s, find the length of the longest substring without duplicate characters.
+
+
+Example 1:
+
+Input: s = "abcabcbb"
+
+Output: 3
+
+Explanation: The answer is "abc", with the length of 3. Note that "bca" and "cab" are also correct answers.
+
+Example 2:
+
+Input: s = "bbbbb"
+
+Output: 1
+
+Explanation: The answer is "b", with the length of 1.
+
+Example 3:
+
+Input: s = "pwwkew"
+
+Output: 3
+
+Explanation: The answer is "wke", with the length of 3.
+
+Notice that the answer must be a substring, "pwke" is a subsequence and not a substring.
+
+
+Constraints:
+
+0 <= s.length <= 5 * 10^4
+
+s consists of English letters, digits, symbols and spaces.
+       i
+abcabcbb
+       j
+  ans=max(ans, j-i+1);
+*/
+
+int solve(string &s) {
+    int n=s.size(), lo=0, hi=0, ans=0;
+    unordered_map<char, int> mp;
+    while(hi<n) {
+        mp[s[hi]]++;
+        while(mp[s[hi]] > 1) {
+            mp[s[lo]]--;
+            if(mp[s[lo]]==0) {
+                mp.erase(s[lo]);
+            }
+            lo++;
+        }
+        ans=max(ans, hi-lo+1);
+        hi++;
+    }
+    return ans;
+}
+int main() {
+    string s="abcabcbb";
+    cout<<solve(s)<<endl;
+}
+
+/*
+Build BOOk My show
+selecting seat
+user can select 1 and more than 1 seat
+1 Million active users on an avg
+200K concurrent users
+Users are geographically distributed
+
+
+#Functional Requirement:-
+SearchMovies();
+showTheater();
+showMoviesTime();
+
+
+Booking();
+    selectSeat();
+    Payment();
+    Notification();
+
+
+#Non Functional Requirement:-
+
+1. Consistent
+2. Availability: 99.9%
+3. Reliability
+
+           Rate Limiter        (cache)
+client --> LoadBalancer --> CDN (CloudFront) --> SearchMovieService
+                                                 showTheater
+                                                 showMoviesTime
+
+                                                 (Redis Lock)
+                                                 Booking
+                                                    selectSeat-Service -->publish Payload to queue --> Payment-Service-->publish payload to queue(Pub/sub Fanout mechanism(SNS(simple Notification Service) + SQS) --> Notification-Service --> gmail
+                                                                                                                                                                                                                        PushInbox Notification
+                                                      DB (Master + Salve Architechture)                                                                                                                                                                    SQS --> Polling
+                                                                                                                                                                                                                        Email Notification
+                                                                                                                                                                                                                        SQS --> Polling
+                                                                                                                                                                                                                        SMS Notification
+Race Condition:-
+where multiple users are trying to select same seat
+--> Locking Mechanism
+--> user1 --> seat: F23 (Lock) --> Payment is done --> Lock will release
+--> User2 --> Seat: F23                                                                                                                                                                                                                        SQS --> Polling
+
+
+Lock:-
+we will create Idempotancy Key --> based on that idempotancy key we should apply redis lock
+Once that operation will complete we will release the lock
+
+What will happen when Redis goes down:-
+
+Can we use DB Lock Here?
+
+pessimistic Locking (Strict Locking) wher we use to avoid duplicate entrise
+
+optimistic Locking:-
+Deal with Verision
+
+upadate tableName
+set xyz
+where cond1
+cand2=version=prevVersion+1
+
+v1
+v2 v3 v2-v1=1
+      v3-v2 != 1
+
+
+
+In Distributed Service How services communicate
+
+1. API Call (Sync Call) __. Drawback: Service A --> is Calling service B (Lets say service B is Down) --> we will get error user exp will be bad
+
+2. Async Call
+ serviceA. --> Queue(publisher/consumer) --> ServiceB
+
+ serviceA wilol prepare the req/payload and publish in queue and service B will consume
+ If service B is down --> service B will be unable to consume
+
+ here we will try to do retry mechanism wher we will reque the payload/req
+ once serviceB will be healthy
+ service B will consume that message do the relevent operation
+ service B will send the ACK to serviceA via same async call so that serviceA should know that opertion is done
+
+
+ How will i know that my service is working fine/service is up??
+ -->
+ 1. Regular look into Grafana dashboad(monitoring) __. Integrate with Slack (msg platform) --> so that we can get alert
+ 2. If there is any spike / abnormal activity
+ 3. check the Logs
+ 4. Go to the DB on a Daily Basis
+    In DB we use to save the suucess and failure state for each and evry action(Dradown, Repayment)
+    SuccessDradown has state=900
+    FailureDrawdown has state=500
+
+    on daily basis count how many sucess and failure actions happend
+
+    if there is sudden increse then check the logs and metrics
+
+    lets say we get failed action ~= 300
+    success: 1 M
+
+    lets say we get failed action ~= 50K --> Found the issue and fix it
+    success: <1 M
+
+*/
+
+
+

@@ -1,0 +1,124 @@
+#include <bits/stdc++.h>
+using namespace std;
+
+int solve(int i, int j, string word1, string word2, vector<vector<int>> &dp) {
+    if(i==0 and j==0) return 0;
+    if(i==0) return j;
+    if(j==0) return i;
+    if(dp[i][j] != -1) {
+        return dp[i][j];
+    }
+
+    if(word1[i-1]==word2[j-1]) {
+        return dp[i][j] = solve(i-1, j-1, word1, word2, dp);
+    }
+    else {
+        int op1=1+solve(i-1, j, word1, word2, dp);
+        int op2=1+solve(i, j-1, word1, word2, dp);
+        int op3=1+solve(i-1, j-1, word1, word2, dp);
+        return dp[i][j] = min({op1, op2, op3});
+    }
+    return -1;
+}
+
+void swap(int &a, int &b) {
+    int temp=a;
+    a=b;
+    b=temp;
+}
+int main() {
+    // int a=3, b=6;
+    // swap(a, b);
+    // cout<<a<<" "<<b<<endl;
+
+    string word1="apple", word2="apple";
+    int n=word1.size(), m=word2.size();
+    vector<vector<int>> dp(n+1, vector<int> (m+1, -1));
+    int ans = solve(n, m, word1, word2, dp);
+    cout<<ans<<endl;
+}
+/*
+// any of them
+word1=aple
+word2=apple
+
+ans=1
+
+// insert
+word1=""
+word2=apple
+ans=5
+
+//delete
+word1=apple
+word2=""
+ans=5
+
+word1=""
+word2=""
+ans=0
+
+//replace --> delete + insert
+word1=apble
+word2=apple
+ans=1
+
+int n, m;
+vector<vector<int>> dp(n, vector<int> (m, -1));
+solve(i, j, n, m);
+if(i==0 and j==0) return 0;
+if(i==0) return j;
+if(j==0) return i;
+if(dp[i][j] != -1) {
+return dp[i][j]
+}
+if(word1[i-1]==word2[j-1]) {
+return solve(i-1, j-1, n, m, dp);
+}
+else {
+ int op1=1+solve(i-1, j, n, m, dp);
+ int op2=1+solve(i, j-1, n, m, dp); // insert
+ int op3=1+solve(i-1, j-1, n, m, dp);
+ return dp[i][j] = min({op1, op2, op3});
+}
+
+without memoization
+n = len of string1
+m= len of string2
+TC - O(3^min(n, m))
+SC - O(height)
+
+dp[][]
+
+
+(2,3)
+
+(4,5)->(3,5),(4,4), (3,4)
+(4,4)->(3,4), (4, 3), (3,3)
+
+TC - O(n*m)
+SC - O(n*m)
+
+
+
+tabulation:-
+op1=1+dp[i][j-1]
+op2=1+dp[i-1][j]
+op3=1+dp[i-1][j-1]
+dp[i][j] = min({op1, op2, op3})
+
+  a p p l e
+a 0 1 2 3 4
+p 1 0 1 2 3
+b 1 2 1 2 3
+l 2 2 2 1 2
+e 3 3 3 2 1
+
+prev[] = {0 1 2 3 4}
+curr[] =
+
+word1[i-1]==word2[j-1]
+*/
+
+
+

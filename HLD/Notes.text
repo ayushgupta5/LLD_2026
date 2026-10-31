@@ -1,0 +1,47 @@
+Video Title: Network Protocols & HLD Concepts (System Design Series)
+Is video mein humne High-Level Design (HLD) ka foundation samjha hai—specifically Network Protocols, Client-Server vs P2P models, aur WebSocket vs WebRTC.
+
+1. Detailed Explanation (Samajhne Wala Part)
+Network protocols basic rules hote hain jisse do systems aapas mein communicate karte hain. HLD mein 2 layers sabse important hain:
+
+Application Layer: User-facing interaction (HTTP, FTP, WebSocket).
+Transport Layer: Data transmission method (TCP vs UDP).
+Client-Server Model (02:59 - 03:45):
+Ye ek one-way road jaisa hai. Client request bhejta hai, aur Server response deta hai. Example: Jab aap browser me URL daalte ho, server web page return karta hai.
+
+Peer-to-Peer (P2P) Model (07:43 - 08:25):
+Isme har machine ek dusre se direct baat kar sakti hai, bina kisi central server ke. Ye decentralized hota hai.
+
+WebSocket (03:51 - 05:14):
+WebSocket bidirectional (two-way) communication allow karta hai. Ye tab use hota hai jab server ko client ko push notification bhejni ho (like WhatsApp messaging). Ye server-to-client continuous connection maintain karta hai.
+
+2. Key Concepts / Definitions
+HTTP (HyperText Transfer Protocol): Web pages access karne ke liye use hota hai (Connection-oriented).
+FTP (File Transfer Protocol): Files transfer karne ke liye. Isme 2 connections hote hain: Control (command ke liye) aur Data (file transfer ke liye).
+SMTP/IMAP/POP (06:14 - 07:23): Email ke liye. SMTP mail bhejne ke liye, aur IMAP/POP mail receive/read karne ke liye.
+TCP vs UDP (08:32 - 11:15):
+TCP: Connection-oriented, sequencing aur acknowledgment (ACK) maintain karta hai. Data loss nahi hota. (Best for files/web pages).
+UDP: Connection-less, fast hota hai, par data loss ho sakta hai. (Best for live streaming/video calls).
+3. Step-by-Step Explanation
+Scenario: Messaging App (WhatsApp) Design:
+
+User A message bhejta hai (Client to Server).
+Server message receive karta hai.
+Server, WebSocket ka use karke User B ko push notification/message real-time me bhejta hai. Ye 2-way communication hai, isliye HTTP ke badle WebSocket best hai.
+4. Important Points (Yaad Rakhne Layak)
+WebSocket vs P2P: WebSocket client-server model ka hi advanced form hai (bi-directional), ye P2P nahi hai.
+HTTP vs HTTPS: Hamesha secure communication (HTTPS) ko prefer karo.
+UDP kab choose karein? Jab speed priority ho aur thoda bahut data loss (frame drop) chale, jaise live streaming (11:14).
+5. Interview Questions (Expected)
+Q: WhatsApp jaisa real-time chat app design karna ho, toh kaunsa protocol use karenge?
+A: WebSocket. Kyunki ye full-duplex (bi-directional) communication allow karta hai jisse server bina request ke bhi message bhej sakta hai.
+Q: Video streaming ke liye TCP kyun nahi use karte?
+A: TCP slow ho sakta hai kyunki wo har packet ka acknowledgment (ACK) wait karta hai aur sequencing manage karta hai. UDP fast hai kyunki wo 'best-effort' basis pe stream karta hai.
+Q: FTP me 2 connections ki kya zaroorat hai?
+A: Control connection command transfer ke liye hota hai jo session ke dauran open rehta hai, aur Data connection actual file transfer hone par banta aur band hota hai.
+6. Quick Revision (30 Sec Recap)
+HTTP/SMTP: Standard request-response (Client-Server).
+WebSocket: Bi-directional chat apps ke liye.
+TCP: Reliable, sequence-based (Web/Files).
+UDP: Fast, non-reliable (Live streaming/Calls).
+P2P: Direct system-to-system communication.

@@ -1,0 +1,123 @@
+[
+  {
+    "httpRequest": {
+      "path": "/cr-decision-eng/health_check"
+    },
+    "httpResponse": {
+      "body": "response from cr-decision-eng"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/customer-exp/health_check"
+    },
+    "httpResponse": {
+      "body": "response from customer-exp"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/loan-app/health_check"
+    },
+    "httpResponse": {
+      "body": "response from loan-app"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/customer-master/health_check"
+    },
+    "httpResponse": {
+      "body": "response from customer-master"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/credit-bureau/health_check"
+    },
+    "httpResponse": {
+      "body": "response from credit-bureau"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/pigeon/health_check"
+    },
+    "httpResponse": {
+      "body": "response from pigeon"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/transaction-statements/health_check"
+    },
+    "httpResponse": {
+      "body": "response from transaction-statements"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/product-master/health_check"
+    },
+    "httpResponse": {
+      "body": "response from product-master"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "account-service/health_check"
+    },
+    "httpResponse": {
+      "body": "response from account-service"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/loan-core/health_check"
+    },
+    "httpResponse": {
+      "body": "response from loan-core"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/payment-engine/health_check"
+    },
+    "httpResponse": {
+      "body": "response from payment-engine"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/pairing-service/health_check"
+    },
+    "httpResponse": {
+      "body": "response from pairing-service"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/customer-master/health_check"
+    },
+    "httpResponse": {
+      "body": "response from customer-master"
+    }
+  },
+  {
+    "httpRequest": {
+      "path": "/partnerpay-engine/health_check"
+    },
+    "httpResponse": {
+      "body": "response from partnerpay-engine"
+    }
+  },
+
+  {
+    "httpRequest": {
+      "path": "/digicard-core/health_check"
+    },
+    "httpResponse": {
+      "body": "response from digicard-core"
+    }
+  }
+]

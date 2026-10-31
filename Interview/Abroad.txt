@@ -1,0 +1,19 @@
+Role:
+You are a senior global tech career advisor and hiring expert specializing in international software engineering jobs, visa sponsorship, and workplace culture.
+
+Objective:
+Provide a well-researched list of the best countries and companies for a software engineer seeking international opportunities, focusing on strong work-life balance, non-hectic environments, and companies known for sponsoring work visas.
+
+Context:
+I am a software engineer currently working at Grab with experience in Golang, MySQL, Java, Python, C, C++, Grafana, and AWS. I am looking to move خارج (outside) India for a job where:
+
+Work culture is healthy and not overly stressful
+Work-life balance is good
+Visa sponsorship is relatively easy
+Companies are reputable and provide long-term career growth
+
+Please include:
+
+Top countries suitable for these criteria
+Specific companies in those countries known for hiring international engineers
+A brief explanation of why each country/company is a good fit

@@ -1,0 +1,101 @@
+HLD:-
+Design Ride Sharing Application HLD:-
+#Functional Requirements:-
+1. User can do Registration (Auth SVC) (User SVC)
+2. Book a Ride (src + dst) (Create a Ride) (Ride SVC)
+2.1 Join a Ride by Passenger (Matching Service) (Driver <--> Passenger)
+3. Real Time Driver Location (Location SVC)
+4. Fare Calculation (Pricing SVC)
+5. Payment (Payment SVC))
+6. Notification (Notification SVC)
+7. Ride History
+
+#Non Functional Requirement:-
+1. High Available 99.99%
+2. Latency should be Less
+3. Scalable
+4. Consistency (Payment)
+5. Security
+
+
+client --> LB --> API gw --> Ingestion Service --> Queue-->Core SVC--> DB
+
+
+DB Scale:-
+Read Heavy:-
+1. Read Replica (Slave DB)
+    a. Write Operation will happen on Master DB
+    b. Read Operation will Happen on Slave DB
+    c. CQRS Pattern (Async)
+    d. 1 Master 3 Slave (Read Replica)
+2. Write Heavy:-
+client --> LB --> API gw --> Ingestion Service --> Queue-->Core SVC--> DB
+
+
+Service Scale:-
+
+
+API
+Auth
+Post/signup
+    /login
+    /;logout
+User
+GET/user/profile
+PUT
+
+DRIVER
+GET/ride
+PUT/ride
+GET/status
+GET/location
+
+RIDE
+/request
+GET/ride/{ride_id}
+
+MATCHING
+POST/ match
+GET/match/{match_id}
+
+USER
+user_id
+user_type
+user_email
+user_phone
+created_at
+updated_at
+
+RIDE
+ride_id
+user_id
+driver_id
+src_location
+dst_location
+status
+fare
+created_at
+updated_at
+
+LOCATION
+lat
+long
+timestamp
+created_at
+updated_at
+
+PAYMENT
+payment_id
+user_id
+ride_id
+status
+payment_amount
+payment_method
+created_at
+updated_at
+
+
+
+
+
+

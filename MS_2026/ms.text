@@ -1,0 +1,77 @@
+Monolithic --<> we have 1 service
+Microservice -->
+
+service A --> queue --> ServiceB --> Core Logic
+
+service A --> queue --> ServiceB --> DB Change --> Queue --> Service C --> consistent
+
+1. Sync Manner
+2. Async Manner --> To achive consistency and avoid bad System behaviour we use this
+
+expose API
+generate Report PDF to user --> 3 query for 3 diff data sources
+for Each Data sources --=> Process the Data --> generate Stream and send it to final Report --> then send it user
+
+Process Each data taking 4-5 minutes
+
+1.Generate the Report(Transaction History)
+    Param 1 (Data Source1) + Param 2 (Data Sources 2)+ Param 3 (Data Sources 3)
+    StartTime and EndTime
+
+    Services
+        1. Lending Service (Interest and Amount Related Info)
+        2. Payment (Payment Related Info)
+        3. OnBoarding Service (UserName, UserEmail, Phone (User Info))
+
+        // Put Operation (Generate the Report / PDF)
+        4. Preparing the Payload
+        5. PDF Generation Service will Prepare the Payload
+        6. Generate the PDF
+        7. Push that PDF into s3 Bucket
+
+        // GET Operation
+        8. PDF Generation Service will get the infro from s3 Bucket
+        9. Have the facility to download the PDF
+
+
+        worfkflow -->
+        payload:{
+            Lending: "lendingInfo" --> 10:01 AM
+            OnBording:"OnBaording Info"--> 10:02 AM
+            Payment:"PaymentInfo" --> 10:03 AM
+        }
+
+   Write Path
+client --> LB --> APIGW --> Common_Ingestion_Service                              queue  --> Lending SVC --> DB
+                      (Prepare the Payload for PDF Generation)         <-- queue --> OnBoarding SVC --> DB
+                                      |
+                                      |
+                                    PDF Generation Service Ingestion                queue --> Payment SVC --> DB
+                                       |
+                                       Kafka Queue
+                                       |
+                                       Core PDF generation Service
+                                       |
+                                       Push PDF to s3 Bucket (later user cans download)
+
+
+Read Path
+client --> LB --> APIGW --> IngestionService                              queue  --> Lending SVC
+                      (Prepare the Payload for PDF Generation)         <-- queue --> OnBoarding SVC
+                                      |
+                                      |
+                                    PDF Generation Service                 queue --> Payment SVC
+                                       |
+                                       Kafka Queue
+                                       |
+                                       Core PDF generation Service
+                                       |
+                                       Push PDF to s3 Bucket
+                                       push
+
+
+1.
+
+
+
+
