@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import unicodedata
 import time
 import urllib.parse
 import urllib.request
@@ -291,12 +292,75 @@ def build_paragraphs(segments: list[Segment]) -> list[str]:
     return paragraphs
 
 
-def render_transcript(t: Transcript, with_timestamps: bool) -> str:
-    """Only the spoken text goes into the file; source, language and notes are shown in the terminal."""
+# Line wrapping ---------------------------------------------------------------------------
+# Width is measured in terminal/editor columns, not characters: in Hindi ~40% of code points are
+# vowel signs and viramas that share a column with their consonant (len("इंटरव्यू") == 8, but it
+# occupies 5 columns), so len()-based wrapping (e.g. textwrap) would make Devanagari lines look
+# far shorter than English ones. wcwidth is the library terminals use for exactly this.
+DEFAULT_LINE_WIDTH = 80
+_CLOSING_PUNCTUATION = set(".,;:!?)]}\"'।॥…–—")
+
+
+def display_width(text: str) -> int:
+    """Columns `text` occupies in a terminal / monospace editor."""
+    try:
+        from wcwidth import wcswidth
+
+        width = wcswidth(text)
+        if width >= 0:
+            return width
+    except ImportError:
+        pass
+    # Fallback without wcwidth: marks that combine with the previous letter take no column, wide CJK takes two.
+    width = 0
+    for ch in text:
+        if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            continue
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def wrap_text(text: str, width: int, first_prefix: str = "", indent: str = "") -> list[str]:
+    """Greedy word wrap by display width. Words are never split; a word longer than the line gets its own line.
+
+    `first_prefix` starts the first line (e.g. "[01:05] ") and `indent` aligns the following lines under the text.
+    """
+    tokens: list[str] = []
+    for word in text.split():
+        if tokens and all(ch in _CLOSING_PUNCTUATION for ch in word):
+            tokens[-1] += word  # never start a line with a lone "।" or "?"
+        else:
+            tokens.append(word)
+    if width <= 0 or not tokens:
+        return [first_prefix + " ".join(tokens)]
+
+    lines: list[str] = []
+    line, line_width = first_prefix, display_width(first_prefix)
+    line_has_word = False
+    for token in tokens:
+        token_width = display_width(token)
+        if line_has_word and line_width + 1 + token_width > width:
+            lines.append(line)
+            line, line_width, line_has_word = indent, display_width(indent), False
+        if line_has_word:
+            line, line_width = line + " " + token, line_width + 1 + token_width
+        else:
+            line, line_width = line + token, line_width + token_width
+        line_has_word = True
+    lines.append(line)
+    return lines
+
+
+def render_transcript(t: Transcript, with_timestamps: bool, width: int = DEFAULT_LINE_WIDTH) -> str:
+    """Only the spoken text goes into the file, wrapped to `width` columns (0 = one line per paragraph)."""
     if with_timestamps:
-        body = "\n".join(f"[{format_timestamp(s.start)}] {s.text}" for s in t.segments)
+        lines: list[str] = []
+        for seg in t.segments:
+            prefix = f"[{format_timestamp(seg.start)}] "
+            lines.extend(wrap_text(seg.text, width, prefix, " " * len(prefix)))
+        body = "\n".join(lines)
     else:
-        body = "\n\n".join(build_paragraphs(t.segments))
+        body = "\n\n".join("\n".join(wrap_text(p, width)) for p in build_paragraphs(t.segments))
     return body + "\n"
 
 
@@ -903,6 +967,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("url", nargs="?", help="video URL (optional; you will be prompted if omitted)")
     parser.add_argument("--language", help="spoken language code, e.g. en, hi (default: auto-detect)")
     parser.add_argument("--timestamps", action="store_true", help="write one [mm:ss] line per segment")
+    parser.add_argument("--width", type=int, default=DEFAULT_LINE_WIDTH, metavar="COLUMNS",
+                        help=f"wrap lines at this many columns (default: {DEFAULT_LINE_WIDTH}; 0 = no wrapping)")
     parser.add_argument("--fast", action="store_true",
                         help="YouTube: accept auto-generated captions instead of running Whisper (faster, less accurate)")
     parser.add_argument("--whisper", action="store_true",
@@ -920,6 +986,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.language:
         args.language = args.language.strip().lower()
+    if args.width < 0 or 0 < args.width < 20:
+        parser.error("--width must be 0 (no wrapping) or at least 20")
     return args
 
 
@@ -951,7 +1019,7 @@ def run(args: argparse.Namespace) -> Path:
         raise TranscriptError("The transcript came out empty, so no file was written.")
 
     output = (args.output_dir.expanduser() / OUTPUT_FILES[ref.platform]).resolve()
-    write_atomically(output, render_transcript(transcript, args.timestamps))
+    write_atomically(output, render_transcript(transcript, args.timestamps, args.width))
 
     elapsed = time.monotonic() - started
     print(f"\nSuccess! Transcript generated in {elapsed:.1f}s")

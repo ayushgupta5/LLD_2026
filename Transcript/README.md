@@ -37,6 +37,7 @@ Python packages (`requirements.txt`):
 | `youtube-transcript-api` | Reads YouTube's existing caption tracks in about a second, without downloading anything |
 | `faster-whisper` | Silero VAD (speech detection) on every machine, and the Whisper backend on non-Apple machines |
 | `mlx-whisper` | Whisper on the Apple Silicon GPU. Installed only on M-series Macs |
+| `wcwidth` | Measures how many columns text really occupies (Hindi vowel signs, CJK, emoji) so lines wrap evenly |
 
 **First run:** Whisper large-v3-turbo (about 1.6 GB) is downloaded once into `~/.cache/huggingface`.
 The MLX copy is already cached on this Mac.
@@ -71,6 +72,7 @@ Optional flags (none are needed for normal use):
 | Flag | Effect |
 |------|--------|
 | `--timestamps` | Writes one `[mm:ss] text` line per segment instead of paragraphs |
+| `--width 100` | Wraps lines at 100 columns instead of 80 (`--width 0` = no wrapping) |
 | `--language hi` | Forces the spoken language (default: detected from the audio) |
 | `--cookies-from-browser chrome` | Uses your logged-in browser session for private or age-restricted content (also `safari`, `firefox`, `edge`, `brave`, …) |
 | `--cookies cookies.txt` | Netscape-format cookie file, as an alternative to the above |
@@ -154,14 +156,34 @@ YouTube sometimes enforces a 2–14 s wait before an audio download starts. The 
 when that happens.
 
 ### Output format
-The file contains only the transcript text, as paragraphs:
+The file contains only the transcript text: paragraphs separated by a blank line, with each line
+wrapped at **80 columns**, the same way code is kept inside a right margin. You never have to scroll
+sideways.
 ```
-So in college, I was a government major, which means I had to write a lot of papers. ...
+So in college, I was a government major, which means I had to write a lot of
+papers. Now, when a normal student writes a paper, they might spread the work
+out a little like this. ...
 
 And that would happen every single paper. ...
 ```
-With `--timestamps` you get one `[mm:ss] text` line per segment instead. Sound tags such as
-`[Music]`, `(Applause)` and `♪` are removed.
+With `--timestamps`, continuation lines are indented under the text:
+```
+[01:05] So in college, I was a government major, which means I had to write a
+        lot of papers.
+```
+Sound tags such as `[Music]`, `(Applause)` and `♪` are removed.
+
+#### How lines are wrapped (and why not `textwrap`)
+- **Column width, not character count.** In Hindi about 40% of code points are vowel signs and
+  viramas that share a column with their letter. `len("इंटरव्यू")` is 8, but the word occupies 5
+  columns. Wrapping by `len()` (as Python's `textwrap` does) would make Hindi lines look about 20%
+  shorter than English ones. The script measures width with `wcwidth`, the library terminals use. If
+  `wcwidth` is missing, it falls back to a Unicode rule.
+- **Words are never split.** A word longer than the line (such as a URL) gets a line of its own.
+  Punctuation such as `।` or `?` never starts a line.
+- **Measured:** rendered with macOS fonts (Menlo, Monaco, JetBrains Mono, with the system's Devanagari
+  fallback font), wrapped Hindi lines are at most 77–78 ASCII columns wide. They stay inside an 80-column
+  margin in a real editor too.
 
 ## 4. Errors and fixes
 
@@ -201,12 +223,13 @@ so use an account you are comfortable with.
 ```bash
 .venv/bin/python -m unittest -v test_transcript.py
 ```
-These are 18 offline tests. They cover:
+These are 22 offline tests. They cover:
 - URL detection: valid forms, look-alike domains, non-video pages
 - Text cleanup and repetition-loop removal
 - Caption track selection: translation-only tracks, dubbed videos
 - Timestamp mapping
 - Error mapping
+- Line wrapping (width limit, no lost or split words, Hindi danda, timestamp indent)
 - Text-only output and the atomic write
 
 ## 6. Known limits

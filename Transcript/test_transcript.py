@@ -144,6 +144,38 @@ class TextTests(unittest.TestCase):
         self.assertEqual(t.render_transcript(tr, False), "Hello there. Bye.\n")
         self.assertEqual(t.render_transcript(tr, True), "[00:00] Hello there.\n[01:05] Bye.\n")
 
+    HINDI = ("इंटरव्यू में पूछा लेटेंट का नया एपिसोड आया और 1.1 मिलियन से ज्यादा लाइक्स डेटाबेस कैसे अपडेट करोगे? "
+             "तुमने बोला हर लाइक पे लाइक्स इक्वल्स लाइक्स प्लस वन रिजेक्टेड। प्रॉब्लम यह है कि सारे लाइक्स एक ही रो पे आ रहे हैं।")
+    ENGLISH = ("So in college, I was a government major, which means I had to write a lot of papers. Now, when a "
+               "normal student writes a paper, they might spread the work out a little like this.")
+
+    def test_wrap_respects_width_and_keeps_every_word(self):
+        for text in (self.HINDI, self.ENGLISH):
+            for width in (20, 40, 80):
+                lines = t.wrap_text(text, width)
+                self.assertTrue(all(t.display_width(line) <= width for line in lines), (width, lines))
+                self.assertEqual(" ".join(lines).split(), text.split())  # nothing lost, nothing split
+
+    def test_display_width_counts_columns_not_codepoints(self):
+        self.assertEqual(len("इंटरव्यू"), 8)
+        self.assertEqual(t.display_width("इंटरव्यू"), 5)  # vowel signs / virama share a column
+        self.assertEqual(t.display_width("hello"), 5)
+        self.assertEqual(t.display_width("日本"), 4)  # wide CJK characters take two columns
+
+    def test_wrap_edge_cases(self):
+        self.assertEqual(t.wrap_text("a " + "x" * 30 + " b", 20), ["a", "x" * 30, "b"])  # long word kept whole
+        self.assertEqual(t.wrap_text("one two three", 0), ["one two three"])  # width 0 = no wrapping
+        self.assertEqual(t.wrap_text("", 80), [""])
+        lines = t.wrap_text("ये है " + "शब्द " * 6 + "।", 20)
+        self.assertFalse(any(line.startswith("।") for line in lines))  # danda never starts a line
+
+    def test_timestamp_lines_wrap_with_hanging_indent(self):
+        tr = t.Transcript([t.Segment(65, 70, self.ENGLISH)], method="x")
+        lines = t.render_transcript(tr, True, 40).splitlines()
+        self.assertTrue(lines[0].startswith("[01:05] "))
+        self.assertTrue(all(line.startswith(" " * 8) and not line[8].isspace() for line in lines[1:]))
+        self.assertTrue(all(len(line) <= 40 for line in lines))
+
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "out.txt"
