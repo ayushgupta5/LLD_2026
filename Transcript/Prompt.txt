@@ -1,0 +1,273 @@
+# GentTechDesign — System Design Reel: Master Prompt
+
+> **Kaise use karein:** neeche **INPUTS** block bharo, raw video attach karo (`@"/path/to/Take.mov"`), aur poora document Claude Code (desktop app) mein paste kar do. Baaki sab yeh prompt khud handle karega: transcript, fact-check, motion graphics, captions, music, thumbnail, upload kit.
+> Agar pichhla Remotion project (`reel2/`) kisi folder mein save hai, uska path bhi do. Claude usko template ki tarah reuse karega, aur kaam bahut fast aur sasta hoga.
+
+---
+
+## INPUTS (fill these in)
+
+```
+RAW_VIDEO        = @"/Users/.../Downloads/Take_YYYY-MM-DD_HH-MM-SS.mov"
+TOPIC            = <one line, e.g. "How Kafka consumer groups scale">
+CHANNEL          = GentTechDesign
+HANDLE           = @gent.tech.design          (watermark + end card)
+TEMPLATE_PROJECT = <path to saved reel2/ folder, or "none">
+MUSIC            = none | <path to a licensed file I downloaded> | <NCS track page link>
+PLATFORMS        = YouTube Shorts + Instagram Reels
+EXTRAS           = thumbnail + upload kit (title, description, tags, caption, hashtags, alt text)
+NOTES            = <anything specific: a word you want highlighted, a scene idea, a deadline>
+```
+
+---
+
+## 1. ROLE & GOAL
+
+You are my video editor, motion designer, technical fact-checker, and packaging strategist. Turn my raw Hinglish talking-head take into a vertical (1080×1920, 30 fps) **system-design explainer Reel/Short**. Keep my footage **uncut and 1:1 in time**: no jump cuts, no speed changes. On top of it, build a dark "developer dashboard" motion-graphics layer that illustrates every sentence as I say it, with word-by-word karaoke captions. The style must match my previous two videos (Hot Row Problem, UPI flow) so the channel looks consistent.
+
+Work end-to-end without stopping, except at the decision points in §11. Report what you did honestly: what you verified, what you assumed, and what you couldn't check.
+
+## 2. NON-NEGOTIABLES
+
+1. **Technical accuracy first.** Fact-check every technical claim I make against primary or reputable sources (official docs, RFCs, engineering blogs, regulator/NPCI/RBI-type sources) **before** designing visuals. If I said something wrong or misleading, stop and tell me (quote my line, give the correction and the source), and don't silently "fix" it in captions.
+2. **Never invent facts, numbers, sources or results.** Illustrative numbers are allowed only when they come from my script, or when they're clearly labelled `example` on screen. On-screen numbers must stay consistent across scenes (keep a *numbers ledger*, §4).
+3. **No real product logos or brand marks.** Generic line icons only. Brand *names* I actually say may appear in captions as text.
+4. **Music licensing.** Never pull music from YouTube or random sites. Plain copyrighted tracks (film scores, "no copyright" re-uploads of film music) get videos blocked; this has already happened to me once. See §7.
+5. **Ask before downloading** any file that isn't a standard tool/model dependency: give filename, source and size.
+6. **Verification loop is mandatory.** Render stills, look at them, fix, re-render. Never hand over an unverified render.
+7. **Privacy:** don't send my name, email or project details to any external service.
+
+## 3. PHASE A — PREP PIPELINE (tested commands & known pitfalls)
+
+1. **Probe** the take with `ffprobe` (resolution, fps, frame count, colour range, audio rate). iPhone takes are HEVC **full-range** with mono audio, sometimes only 16 kHz.
+2. **Proxy:** `ffmpeg -i in.mov -vf "scale=in_range=full:out_range=tv,format=yuv420p" -c:v libx264 -crf 14 -preset slow -r 30 -an public/speaker.mp4`. Without the full→TV conversion, the picture looks washed out.
+3. **Voice:** chain `highpass=80, afftdn=nf=-25, deesser, acompressor 3:1 @-18dB, aresample=48000, pan=stereo (centred), limiter`, then **2-pass `loudnorm` measured on the stereo signal** → **−14 LUFS integrated, ≤ −1 dBTP**. Normalising in mono and then duplicating to stereo lands about 3 LU too loud.
+4. **Transcript (Hinglish):**
+   - Use `faster-whisper large-v3`, and pass audio as a **numpy array**, because the bundled PyAV `decode_audio` breaks.
+   - A `language="hi"` pass outputs Devanagari and **drops whole stretches**. A `language="en"` pass **translates** instead of transcribing. Re-run Hindi on the dropped windows to recover the real words.
+   - Then **you write the corrected romanised Hinglish script** (spelling as people type it), chunked into 3–8-word caption phrases with keywords marked.
+5. **Word timings:** force-align *my corrected script* to the audio with the MMS aligner from Hugging Face (`MahmoudAshraf/mms-300m-1130-forced-aligner` + `torchaudio.functional.forced_align`).
+   - **Map spoken forms:** OTT→"otiti", UPI→"yupiaai", NPCI→"enpisiaai", 10,000→"ten thousand", 4800→"adtalis sau", and so on.
+   - **Resolve ambiguous words** by scoring alternative spellings against the audio; the highest log-probability wins.
+   - **Sanity-check** against `silencedetect`.
+   - The torchaudio built-in MMS download URL can fail on SSL in Python; use the HF copy.
+6. **Background-removed cutout** (full-screen windows only):
+   - On macOS, use **Apple Vision `VNGeneratePersonSegmentationRequest` (accurate)** via a small Swift CLI: no model download, clean hair edges.
+   - Extract PNG frames for each full-screen window **plus 0.5 s handles**, named by source frame index.
+   - **Measure the matte bounding box** (hair top, side edges). Don't place the cutout by eye.
+7. **Framing:** find the eye line in the source and choose the split-mode crop so my **eyes land at y≈1400** and nothing above the hair is cut. In full-screen mode, shift the cutout so the **hair top lands at y≈930**.
+
+## 4. PHASE B — RESEARCH & STORY (deep analysis)
+
+1. **Fact-check pass** (§2.1): list every claim → source → verdict. Cite sources in your report.
+2. **Beat sheet:** split the script into **Hook → Problem → Mechanism steps → Twist/Payoff → Recap → CTA**.
+3. **Choose 3–5 full-screen punchlines:**
+   - The hook question, the problem's name, the "twist" line, the concept's official name, and an optional outro.
+   - Each window needs ≥ 1.5 s of speech; shorter ones are skipped.
+   - The **first 2 seconds must already move**: on-screen text and motion in the opening are the strongest scroll-stoppers.
+4. **One visual per sentence.** Every beat is keyed to a **spoken word** (land on it or 2 frames before). The stage is never empty for more than about 10 frames, and there's a new visual element at least every 3 seconds.
+5. **Numbers ledger:** every on-screen number is listed once, and every scene that shows it uses the same value. Running totals must add up (e.g. 15,282 + 3 = 15,285).
+6. **Visual metaphor rules:**
+   - Systems are **NodeCards** (stable IDs that *glide* between scenes, never re-mount).
+   - Messages and requests are **packets** moving along **connectors**.
+   - Storage is **tables and ledgers**; queues and logs are **partition strips**; timing and latency use **meters and odometers**.
+   - Use whatever metaphor in that same spirit fits the topic.
+
+## 5. PHASE C — DESIGN SYSTEM (keep identical across videos)
+
+**Colour tokens:**
+
+| Token | Value | Use |
+|---|---|---|
+| `bg` | `#111114` | Stage background |
+| `grid` | `rgba(255,255,255,.035)` | 72 px grid |
+| `card` | `#18181D` | Cards (border `#2A2A34`) |
+| `iconTile` | `#212129` | Square behind icons |
+| `text` | `#F2EFE6` | Primary text |
+| `textDim` | `rgba(242,239,230,.35)` | Unspoken caption words |
+| `muted` | `#6E6C7A` | Secondary text, connectors |
+| `accent` | **`#A18BFF`** (glow `#BBA9FF`, deep `#7C64F2`) | The ONLY brand colour |
+| `green` | `#3FCB7E` | Success |
+| `red` | `#F0506E` | Failure |
+| `cyan` | `#5CD6F0` | Data in flight |
+| `amber` | `#F0A040` | Debits and warnings only |
+
+Colour discipline: green, red and cyan mean only success, failure and data.
+
+**Type:** Inter 600/700/800/900 for UI, captions and titles; JetBrains Mono for code, numbers and IDs, with tabular numerals.
+
+**Layout modes:**
+- **SPLIT (~85% of runtime):**
+  - **Top half (y 0–960):** graphics. Content is shifted **down 70 px** to clear the platform UI at the top.
+  - **Bottom half:** camera, cropped 1080×960, with the grade: contrast +6, highlights −12 to −15, saturation −6, a soft vignette, and a 240 px dark scrim under the captions.
+  - **Divider:** 2 px violet line at y=960 with a glow.
+  - **Watermark:** `HANDLE` at (50, 1018).
+- **FULL-SCREEN CUTOUT (punchlines):**
+  - **Background:** graphite grid, a violet radial glow behind me, and a faint warm glow.
+  - **Cutout:** sticker outline (6 px off-white, dilated alpha, never on the clipped edges).
+  - **Title:** BigTitle in the top 40%.
+  - **Captions:** move to y≈1555 over the chest. No watermark.
+- **Mode switch (11 frames, centred on the window edge):**
+  - **To full-screen:** the camera blurs out and brightens into a "ghost", the divider fades, the title letters start revealing, plus a whoosh.
+  - **Back to split:** a brightness bloom of 1.3→1.0.
+
+**Captions (karaoke):**
+- **Style:** Inter 800, 50 px, max 900 px wide, 2 lines max, straddling the divider in split mode.
+- **Word states:** unspoken words are dim; spoken words turn white with a 1.04 bump; **keywords turn violet with a glow**.
+- **Transitions:** phrases fade and rise in; when the gap is under 6 frames, cut straight to the next phrase.
+- **Line breaks:** use a **deterministic glyph-width estimate**. Don't use `measureText` before the fonts load: it caches wrong widths and lines overflow.
+
+**Components (build once, reuse):**
+- GridBackground
+- NodeCard (states: idle, ghost, active, success, error, warn, dim; cross-fade over 6 frames; badge pop)
+- StatusBadge
+- Connector (variants: dashed draw-on, accent, failed, flow, crossed)
+- Packet (dot, heart and fat-chip variants, with trail)
+- PacketStream
+- BigTitle (letter reveal; auto-fit to 960 px; last letters bounce)
+- Odometer (rolling digits)
+- TableRow (hot / locked / success states)
+- PartitionStrip (offset pointer)
+- TerminalCard (typewriter)
+- LoadMeter
+- ChatBubble
+- PhoneMockup / generic app phone (no logos)
+- Ledger
+- HeartStream
+- Disintegrate (and its reverse)
+- Sparkle
+
+**Motion:**
+- **Easing:** spring everywhere (damping 14, stiffness 160 for pops). Only packet travel and dashed-line flow are linear.
+- **Exits:** 8 frames, faster than entrances.
+- **Glides:** persistent nodes glide over about 15 frames.
+- **Crash moments:** a 2-frame, 4 px **stage-only** shake.
+- **Idle elements:** breathe with small sine-wave motion.
+
+## 6. PHASE D — BUILD (Remotion 4 + TypeScript)
+
+**Structure:**
+- `src/theme.ts`: tokens and fonts via `@remotion/google-fonts`.
+- `src/beats.ts`: **every beat keyed to a transcript word**, e.g. `b(chunk, "word")` returns that word's frame minus 2. No magic frame numbers in scene files.
+- `src/layout.ts`: the node registry (keyframed rects and states).
+- `src/captions.tsx`, `src/modes.ts` (full-screen windows and the mix value).
+- `src/Stage.tsx`: camera half, cutout, divider, scene layers, audio.
+- `src/scenes/*`
+- `src/sfx.ts`: synthetic SFX keyed to beats.
+- `src/music.ts`: per-frame ducking derived from word timings.
+
+**Layering:** scene "under" layer (connectors, packets) → NodeLayer → scene "over" layer (labels, badges, rows inside cards).
+
+**Known gotchas:**
+- **SVG quadratic bend sign:** a positive bend curves *down* in screen coordinates, so arcs meant to go *over* cards need a negative bend.
+- **Missing nodes:** never draw a connector to a node that isn't visible yet (its rect is 0,0).
+- **No emoji in graphics:** they render as colour glyphs that break the palette.
+- **Fonts:** `₹` renders fine in Inter.
+- **zsh:** unquoted variables don't word-split, so use arrays for ffmpeg args.
+- **Remotion browser:** `npx remotion browser ensure` downloads the headless shell.
+
+**SFX:** synthesise a quiet kit with ffmpeg (pop, whoosh, glitch, tick, type, click, lock) and never download SFX.
+- **Placement:** pops on node and badge entrances (max one per 4 frames), a whoosh on mode switches, ticks on odometers, typing ticks on typewriters, and a click on the Follow button.
+- **Level:** about −20 to −25 dB peak.
+
+## 7. PHASE E — MUSIC (licensing first)
+
+- **If `MUSIC = none`:** render a voice + SFX version only, and suggest in-app music.
+- **If it's an NCS track** (ncs.io, official download button):
+  - **Licence:** NCS's usage policy covers **YouTube (and Twitch) with the credit block in the description**. It does **not** cover Instagram.
+  - **Two versions:** render a **YouTube version with music** and an **Instagram version without music** (add music in-app from Instagram's library).
+- **Vocals vs. narration:** if the track has vocals, map them (Demucs `htdemucs` vocal stem). If there isn't enough vocal-free music, use the **instrumental stem** (vocals removed) so lyrics never compete with my Hinglish. Fetch the Demucs weights with `curl` and check the hash in the filename; Python urllib may hit SSL errors.
+- **Beat-cut the bed:** find the BPM and beat grid, and land the **main drop exactly on the biggest full-screen punchline** (within 2 frames). Prefer a continuous section; nudge tempo by at most ~1% only if two hit points must both line up.
+- **Mix:**
+  - **Bed level:** normalise to −16 LUFS, **duck about 15 dB under speech**, and let it come up in pauses (attack 4 frames, release 10 frames).
+  - **Make room for the voice:** EQ dip −4 dB at 2.5 kHz.
+  - **Ends:** fade in 0.4 s, fade out 1.5 s, and keep the final mix at −14 LUFS.
+- **Verify the music is actually there:** subtract the no-music render from the music render and measure the residual under speech, before drops and at the fade.
+
+## 8. PHASE F — QA LOOP & EXPORT
+
+1. **Stills:** render stills for **every scene and both sides of every mode switch**. Bundle once with `@remotion/bundler` + `renderStill` in a single Node script (much faster than repeated `npx remotion still`). Build 4-up contact sheets and **look at them**.
+2. **Check, in order:**
+   - Overlapping elements.
+   - Text touching edges or overflowing (BigTitle auto-fit, captions ≤ 2 lines).
+   - Elements that should appear but don't (connectors to hidden nodes, arcs hidden behind cards).
+   - Captions match the corrected script, with keywords violet at the right moment.
+   - Numbers ledger is consistent.
+   - Safe zones: nothing important in the top ~200 px or the bottom ~250 px of the frame.
+   - The cutout's left/right edges are flush and the sticker outline isn't on clipped edges.
+3. **Fix, then re-render** the affected stills until a clean pass.
+4. **Export:** H.264, CRF 16, yuv420p, AAC 320 kbps / 48 kHz, exact source frame count, last frame held (no fade to black).
+5. **Verify the export:** frame count with `ffprobe -count_frames`, integrated loudness and true peak with `ebur128`, and frames pulled from the **encoded** file.
+
+## 9. PHASE G — PACKAGING (YouTube + Instagram)
+
+**Query research:** pull YouTube autocomplete for India (`suggestqueries.google.com/complete/search?client=firefox&ds=yt&gl=IN&q=…`) for 6–10 candidate phrasings. Pick the phrase with real demand for the title, and keep "concept names" with no autocomplete as hooks, not search terms.
+
+**Title:**
+- Write 10 and score them (≤ 60 characters; the subject survives the ~40-character mobile cut; carries a number or name; ≤ 2 all-caps words; no vague hype words).
+- Pick the winner on judgement and say why.
+- The title and the thumbnail text must use **different words**.
+
+**Description (YouTube):**
+- **First 2 lines:** the search phrase plus what the viewer gets.
+- **Then:** what's covered as bullets, the one-line recap, and a comment CTA.
+- **Then:** the music credit block (if NCS).
+- **Then:** 5–7 hashtags. The first 3 show above the title, so put the broadest ones first.
+- **Tags:** ≤ 15, for spellings and disambiguation only.
+
+**Instagram caption:**
+- **First line:** hook plus keyword, since Instagram search reads captions.
+- **Then:** numbered steps, the recap, and a CTA ("save kar lijiye").
+- **Hashtags:** **exactly 5**. Instagram caps at 5 per post, and tags in comments count toward the cap.
+- **Also write** alt text.
+
+**Thumbnail / cover (1080×1920):**
+- **Face:** pick the most expressive face from the cutout frames (contact-sheet them).
+- **Text:** **≤ 3 words** of headline in Inter 900, plus one small series tag and one or two supporting graphics from the video.
+- **Safe zone:** keep everything key inside the **centre 1080×1440 band**, which Instagram's 3:4 grid keeps.
+- **Fallback:** custom Shorts thumbnails are Partner Program + desktop only, so give a fallback "pick this frame at m:ss" (eyes open, title fully revealed).
+
+**Upload kit:** a markdown file with every copy-paste block, which file goes to which platform, and the music credit.
+
+## 10. DELIVERABLES & FINAL REPORT
+
+**Files:**
+- `out/<slug>-youtube.mp4` (with licensed music, if any)
+- `out/<slug>-no-music.mp4`
+- `out/<slug>-thumbnail-1080x1920.png`
+- `out/<slug>-ig-grid-preview-3x4.png`
+- `upload-kit-<slug>.md`
+- The Remotion project, so the next video can reuse it.
+
+**Report:**
+- What the video now does, scene by scene, in one short paragraph.
+- Fact-check results with sources.
+- Every place you deviated from my script or this prompt, and why.
+- Verified specs: frames, LUFS, true peak, music placement.
+- Anything you couldn't verify.
+
+## 11. ASK ME ONLY WHEN
+
+- A **technical claim in my take is wrong** (show the correction and source; ask whether to re-record or caption around it).
+- A **word is ambiguous after audio scoring** (show the top 2 candidates and their scores).
+- **Licensing is unclear** for the music I gave you.
+- A **download** is needed that isn't a standard tool or model dependency.
+- **Before the final render,** if the handle, channel name or watermark is missing.
+
+Everything else: decide sensibly, note it in the report, and keep going.
+
+---
+
+### Short version (when you're in a hurry)
+
+```
+@"<RAW_VIDEO>"
+Is take ko mere GentTechDesign system-design Reel style mein edit karo (1080×1920, 30fps, footage uncut):
+dark graphite UI + violet #A18BFF accent, SPLIT mode (graphics top, camera bottom, violet divider at y=960,
+karaoke captions with violet keywords) + 3–5 FULL-SCREEN cutout punchlines with BigTitle.
+Pehle mere har technical claim ko sources se fact-check karo, phir script correct karke forced-align karo,
+har sentence ka visual word-timed ho. Voice −14 LUFS. Music: <none | NCS link> — NCS sirf YouTube version mein
+(credit ke saath), Instagram version bina music. Stills render karke QA loop karo, phir final render.
+Thumbnail (≤3 words, 3:4 safe zone) + upload kit (title via YouTube autocomplete research, description,
+tags, IG caption with 5 hashtags, alt text). Watermark: @gent.tech.design.
+```
